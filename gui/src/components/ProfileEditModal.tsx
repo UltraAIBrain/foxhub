@@ -235,11 +235,15 @@ export function ProfileEditModal(props: {
       ]}
     >
       <Form form={form} layout="vertical">
+        {/* forceRender on every panel: validateFields only sees mounted
+            Form.Items, so a save from the first tab would otherwise send
+            fingerprint/proxy/automation values as undefined. */}
         <Tabs
           items={[
             {
               key: "basic",
               label: t.tabBasic,
+              forceRender: true,
               children: (
                 <>
                   <Form.Item name="name" label={t.fieldName} rules={[{ required: true }]}>
@@ -260,6 +264,7 @@ export function ProfileEditModal(props: {
             {
               key: "fingerprint",
               label: t.tabFingerprint,
+              forceRender: true,
               children: (
                 <>
                   <Form.Item name="fingerprintMode" label={t.fieldMode}>
@@ -343,6 +348,7 @@ export function ProfileEditModal(props: {
             {
               key: "proxy",
               label: t.tabProxy,
+              forceRender: true,
               children: (
                 <>
                   <Form.Item name="proxyKind" label={t.proxyKind}>
@@ -398,6 +404,7 @@ export function ProfileEditModal(props: {
             {
               key: "automation",
               label: t.tabAutomation,
+              forceRender: true,
               children: (
                 <>
                   <Form.Item name="automation" label={t.automationEnable} valuePropName="checked">
