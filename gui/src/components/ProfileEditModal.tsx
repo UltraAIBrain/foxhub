@@ -133,7 +133,7 @@ function toFormValues(p: Profile): FormValues {
     locale: p.locale ?? undefined,
     timezone: p.timezone ?? undefined,
     geoip: p.geoip,
-    webrtcMode: p.webrtcMode ?? "auto",
+    webrtcMode: p.webrtcMode || "auto",
     webrtcIpv4: p.webrtcIpv4 || undefined,
     proxyKind: p.proxy.kind,
     proxyHost: p.proxy.host || undefined,

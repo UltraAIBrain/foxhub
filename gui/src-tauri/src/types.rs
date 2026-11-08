@@ -92,6 +92,10 @@ pub struct Summary {
     pub media_devices: Option<Vec<u32>>,
 }
 
+fn default_webrtc_mode() -> String {
+    "auto".into()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Profile {
@@ -111,8 +115,11 @@ pub struct Profile {
     pub locale: Option<String>,
     pub timezone: Option<String>,
     pub geoip: bool,
-    /// "auto" | "block" | "custom"
+    /// "auto" | "block" | "custom"; profiles saved before the field existed
+    /// deserialize as "auto".
+    #[serde(default = "default_webrtc_mode")]
     pub webrtc_mode: String,
+    #[serde(default)]
     pub webrtc_ipv4: String,
     pub proxy: ProxyConfig,
     pub automation: bool,

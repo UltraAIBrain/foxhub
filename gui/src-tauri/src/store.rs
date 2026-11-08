@@ -187,6 +187,30 @@ mod tests {
     }
 
     #[test]
+    fn legacy_profile_without_webrtc_fields_reads_as_auto() {
+        // Profiles saved before WebRTC control existed have no webrtcMode.
+        let root = tmp_root("legacy");
+        let store = Store::new(&root);
+        let legacy = r#"{
+            "id": "old1", "name": "old", "group": "", "notes": "",
+            "createdAt": 1, "lastLaunchedAt": null, "launchCount": 0,
+            "fingerprintMode": "fixed", "os": "windows", "screen": null,
+            "window": null, "locale": null, "timezone": null, "geoip": false,
+            "proxy": {"kind": "none", "host": "", "port": 0},
+            "automation": false, "config": null, "prefs": null,
+            "launchExecutable": null, "launchArgs": [], "extraEnv": {},
+            "summary": null
+        }"#;
+        let dir = store.profile_dir("old1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("profile.json"), legacy).unwrap();
+        let profile = store.get("old1").unwrap();
+        assert_eq!(profile.webrtc_mode, "auto");
+        assert_eq!(profile.webrtc_ipv4, "");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn rejects_path_escape_ids() {
         let root = tmp_root("ids");
         let store = Store::new(&root);
