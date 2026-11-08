@@ -10,7 +10,6 @@ mod store;
 mod types;
 
 use commands::AppState;
-use launch::kill_tree;
 use settings::Settings;
 use tauri::{Manager, RunEvent};
 
@@ -29,6 +28,7 @@ pub fn run() {
             std::thread::spawn(move || {
                 commands::restore_running_browsers(&handle);
             });
+            commands::start_supervisor(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -78,15 +78,31 @@ pub fn run() {
 
 fn close_all(app_handle: &tauri::AppHandle) {
     if let Some(state) = app_handle.try_state::<AppState>() {
-        let pids: Vec<u32> = state
-            .running
-            .lock()
-            .unwrap()
-            .values()
-            .map(launch::Running::pid)
+        let ids: Vec<String> = state.running.lock().unwrap().keys().cloned().collect();
+        if ids.is_empty() {
+            return;
+        }
+        let root = state.store.profiles_dir();
+        // Ask every browser to close in one pass so each flushes its session,
+        // then force whatever is left after a shared deadline: an exit must
+        // not wait out one grace period per window.
+        let pids: Vec<u32> = ids
+            .iter()
+            .flat_map(|id| launch::profile_processes(&root, id))
             .collect();
+        for pid in &pids {
+            launch::post_close(*pid);
+            launch::soft_kill(*pid);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        while std::time::Instant::now() < deadline {
+            if pids.iter().all(|pid| !launch::pid_alive(*pid)) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
         for pid in pids {
-            let _ = kill_tree(pid);
+            let _ = launch::kill_tree(pid);
         }
     }
 }

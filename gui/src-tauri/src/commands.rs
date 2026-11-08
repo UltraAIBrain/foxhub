@@ -287,7 +287,11 @@ async fn launch_profile_inner(
     }
 
     let mut child = launch::spawn_browser(&executable, &profile, &userdata, local_port)?;
-    let pid = child.id();
+    let stub_pid = child.id();
+    // The spawned process may be Windows' launcher, which exits as soon as it
+    // has started the browser; store the process that carries the profile.
+    let pid = launch::wait_for_browser_pid(&state.store.profiles_dir(), id, Duration::from_secs(20))
+        .unwrap_or(stub_pid);
 
     profile.last_launched_at = Some(launch::now());
     profile.launch_count += 1;
@@ -299,40 +303,90 @@ async fn launch_profile_inner(
         Running::Browser {
             pid,
             forwarder: forwarder_handle,
+            since: std::time::Instant::now(),
         },
     );
     AppState::emit_status(app, id, "running", json!({ "pid": pid }));
 
-    // Exit watcher: clean up the forwarder and report the outcome.
-    let app_handle = app.clone();
-    let watch_id = id.to_string();
+    // Reap the spawned handle so no zombie remains; the profile supervisor
+    // reports the exit once no process carries the profile any more.
     std::thread::spawn(move || {
         let _ = child.wait();
-        if let Some(running) = app_handle
-            .state::<AppState>()
-            .running
-            .lock()
-            .unwrap()
-            .remove(&watch_id)
-        {
-            if let Running::Browser { forwarder, .. } = running {
-                if let Some(f) = forwarder {
-                    f.stop();
-                }
-            }
-        }
-        AppState::emit_status(&app_handle, &watch_id, "exited", json!({}));
     });
     Ok(())
 }
 
 #[tauri::command]
 pub fn close_profile(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let running = state.running.lock().unwrap();
-    let entry = running
-        .get(&id)
-        .ok_or_else(|| "profile is not running".to_string())?;
-    launch::stop(entry.pid())
+    let graceful = {
+        let running = state.running.lock().unwrap();
+        match running.get(&id) {
+            Some(Running::Browser { .. }) => true,
+            Some(Running::Automation { .. }) => false,
+            None => return Err("profile is not running".to_string()),
+        }
+    };
+    if graceful {
+        // Every process carrying the profile, launcher included; the map entry
+        // is removed by the supervisor once none is left.
+        launch::close_profile_processes(&state.store.profiles_dir(), &id)
+    } else {
+        let pid = {
+            let running = state.running.lock().unwrap();
+            running.get(&id).map(Running::pid).unwrap_or(0)
+        };
+        launch::stop(pid)
+    }
+}
+
+/// Watch launched browsers and report an exit once the process carrying the
+/// profile is gone. The cheap `pid_alive` check runs every two seconds; a
+/// command-line scan only happens after that pid died, to see whether the
+/// browser re-launched under a new one.
+pub fn start_supervisor(app: AppHandle) {
+    std::thread::spawn(move || {
+        const STARTUP_GRACE: Duration = Duration::from_secs(15);
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            let state = app.state::<AppState>();
+            let ids: Vec<String> = state.running.lock().unwrap().keys().cloned().collect();
+            for id in ids {
+                let entry = {
+                    let running = state.running.lock().unwrap();
+                    match running.get(&id) {
+                        Some(Running::Browser { pid, since, .. }) => {
+                            (*pid, since.elapsed() >= STARTUP_GRACE)
+                        }
+                        _ => continue,
+                    }
+                };
+                let (pid, old_enough) = entry;
+                if !old_enough || launch::pid_alive(pid) {
+                    continue;
+                }
+                // The tracked pid is gone: either the browser closed, or the
+                // launcher handed off to another pid.
+                let remaining = launch::profile_processes(&state.store.profiles_dir(), &id);
+                match remaining.first() {
+                    Some(new_pid) => {
+                        let mut running = state.running.lock().unwrap();
+                        if let Some(Running::Browser { pid, .. }) = running.get_mut(&id) {
+                            *pid = *new_pid;
+                        }
+                    }
+                    None => {
+                        let removed = state.running.lock().unwrap().remove(&id);
+                        if let Some(Running::Browser { forwarder, .. }) = removed {
+                            if let Some(f) = forwarder {
+                                f.stop();
+                            }
+                            AppState::emit_status(&app, &id, "exited", json!({}));
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -704,11 +758,15 @@ pub fn restore_running_browsers(app: &AppHandle) -> usize {
         if state.store.get(&id).is_err() || state.is_running(&id) {
             continue;
         }
-        state
-            .running
-            .lock()
-            .unwrap()
-            .insert(id.clone(), Running::Browser { pid, forwarder: None });
+        state.running.lock().unwrap().insert(
+            id.clone(),
+            Running::Browser {
+                pid,
+                forwarder: None,
+                // Old enough by definition: it is already running.
+                since: std::time::Instant::now() - Duration::from_secs(60),
+            },
+        );
         AppState::emit_status(app, &id, "running", json!({ "pid": pid, "recovered": true }));
         restored += 1;
     }

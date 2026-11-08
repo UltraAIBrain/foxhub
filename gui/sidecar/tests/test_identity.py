@@ -2,7 +2,7 @@
 
 import pytest
 
-from camfox_sidecar.mapping import identity_id, summary
+from camfox_sidecar.mapping import canvas_covered, identity_id, summary
 from camfox_sidecar.prepare import _apply_webrtc
 
 
@@ -60,6 +60,23 @@ class TestSummary:
         s = summary(CONFIG)
         assert "identityId" in s and "identity_id" not in s
         assert "gpuVendor" in s and "gpu_vendor" not in s
+
+
+class TestCanvasCovered:
+    def test_absent_override_is_uncovered(self):
+        assert canvas_covered({}) is False
+        assert canvas_covered({"privacy.baselineFingerprintingProtection.overrides": None}) is False
+
+    def test_canvas_target_means_covered(self):
+        prefs = {
+            "privacy.baselineFingerprintingProtection.overrides":
+                "+CanvasImageExtractionPrompt,+CanvasExtractionBeforeUserInputIsBlocked"
+        }
+        assert canvas_covered(prefs) is True
+
+    def test_other_overrides_do_not_cover(self):
+        prefs = {"privacy.baselineFingerprintingProtection.overrides": "+CanvasRandomization"}
+        assert canvas_covered(prefs) is False
 
 
 class TestWebrtcMapping:

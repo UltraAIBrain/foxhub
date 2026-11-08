@@ -13,7 +13,7 @@ from camoufox.fingerprints import Screen
 from camoufox.pkgman import camoufox_path
 from camoufox.utils import launch_options
 
-from .mapping import decode_chunks, parse_config, proxy_kwarg, summary
+from .mapping import canvas_covered, decode_chunks, parse_config, proxy_kwarg, summary
 
 
 def _collect_warnings(caught: List[warnings.WarningMessage]) -> List[str]:
@@ -77,7 +77,7 @@ def prepare(req: Dict[str, Any]) -> Dict[str, Any]:
         "prefs": prefs,
         "proxy": result.get("proxy"),
         "extra_env": extra_env,
-        "summary": summary(config),
+        "summary": {**summary(config), "canvasCovered": canvas_covered(prefs)},
         "warnings": _collect_warnings(list(caught)),
     }
 

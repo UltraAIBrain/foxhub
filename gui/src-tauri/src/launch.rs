@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -169,10 +169,12 @@ pub fn pid_alive(pid: u32) -> bool {
         match output {
             Ok(out) => String::from_utf8_lossy(&out.stdout)
                 .lines()
+                // CSV: "image","pid",... — the pid is the second field; a
+                // filtered-out pid prints a localised INFO line instead.
                 .any(|l| {
                     l.split(',')
-                        .next()
-                        .map(|f| f.contains(&pid.to_string()))
+                        .nth(1)
+                        .map(|f| f.trim_matches('"').trim() == pid.to_string())
                         .unwrap_or(false)
                 }),
             Err(_) => true, // cannot tell; keep the stricter error path
@@ -276,6 +278,20 @@ pub fn parse_process_list(text: &str) -> Vec<(u32, String)> {
         .collect()
 }
 
+/// The value after `-profile` in a command line, quote-aware.
+///
+/// The real browser's argv is `... -profile "C:\path with spaces\alpha"`, while
+/// a manually started process may pass it unquoted, so both forms are read.
+pub fn profile_arg(cmdline: &str) -> Option<String> {
+    let idx = cmdline.find("-profile")?;
+    let rest = cmdline[idx + "-profile".len()..].trim_start();
+    if let Some(stripped) = rest.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        return Some(stripped[..end].to_string());
+    }
+    rest.split_whitespace().next().map(str::to_string)
+}
+
 /// Kernel processes whose `-profile` points into our profiles directory, as
 /// (pid, profile id). After a GUI restart these browsers are still running
 /// with no state to close them by, so they are re-attached at startup.
@@ -303,15 +319,14 @@ pub fn find_running_profiles_sync(profiles_root: &Path, cim_text: &str) -> Vec<(
     let root_norm = root_norm.trim_end_matches('\\');
     let mut found = Vec::new();
     for (pid, cmdline) in parse_process_list(cim_text) {
-        if !cmdline.contains("-profile") {
+        let Some(profile) = profile_arg(&cmdline) else {
             continue;
-        }
-        // The userdata dir is <profiles_root>\<id>\userdata; take the segment
-        // after the profiles root in the process's own path spelling.
-        let cmdline_norm = cmdline.replace('/', "\\");
+        };
+        // The userdata dir is <profiles_root>\<id>\userdata; take the id.
+        let profile_norm = profile.replace('/', "\\");
         let marker = format!("{root_norm}\\");
-        if let Some(pos) = cmdline_norm.find(&marker) {
-            let rest = &cmdline_norm[pos + marker.len()..];
+        if let Some(pos) = profile_norm.find(&marker) {
+            let rest = &profile_norm[pos + marker.len()..];
             let id = rest.split('\\').next().unwrap_or("");
             if !id.is_empty() {
                 found.push((pid, id.to_string()));
@@ -365,6 +380,9 @@ pub enum Running {
     Browser {
         pid: u32,
         forwarder: Option<ForwarderHandle>,
+        /// When this launch was registered; the supervisor ignores very young
+        /// entries so a slow start is not mistaken for an exit.
+        since: std::time::Instant,
     },
     Automation {
         child: Child,
@@ -385,6 +403,121 @@ impl Running {
             Running::Automation { .. } => "automation",
         }
     }
+}
+
+/// Every live process whose `-profile` points at this profile, launcher and
+/// browser alike (Windows starts a launcher process that carries the same
+/// argv before the browser process appears).
+pub fn profile_processes(profiles_root: &Path, id: &str) -> Vec<u32> {
+    find_running_profiles(profiles_root)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, found)| found == id)
+        .map(|(pid, _)| pid)
+        .collect()
+}
+
+/// Ask a process to close without forcing it: `taskkill` without `/F` posts
+/// WM_CLOSE, which lets Firefox flush cookies and session state.
+pub fn soft_kill(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
+            .creation_flags(0x0800_0000)
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    }
+}
+
+/// Post WM_CLOSE to every visible top-level window this pid owns; returns how
+/// many were found.
+///
+/// `taskkill` without `/F` only queues the message and returns at once, and
+/// its exit code says nothing about delivery. Posting directly makes the
+/// request verifiable and independent of the console locale.
+#[cfg(windows)]
+pub fn post_close(pid: u32) -> u32 {
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, TRUE};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE,
+    };
+
+    thread_local! {
+        static TARGET: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        static POSTED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    unsafe extern "system" fn callback(hwnd: HWND, _lparam: LPARAM) -> BOOL {
+        let target = TARGET.with(|t| t.get());
+        let mut window_pid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut window_pid) };
+        if window_pid == target && unsafe { IsWindowVisible(hwnd) } != 0 {
+            if unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) } != 0 {
+                POSTED.with(|p| p.set(p.get() + 1));
+            }
+        }
+        TRUE
+    }
+
+    TARGET.with(|t| t.set(pid));
+    POSTED.with(|p| p.set(0));
+    unsafe { EnumWindows(Some(callback), 0) };
+    POSTED.with(|p| p.get())
+}
+
+#[cfg(not(windows))]
+pub fn post_close(_pid: u32) -> u32 {
+    0
+}
+
+/// Wait until a process carrying this profile exists and return its pid.
+///
+/// The spawned process may be Windows' launcher, which exits as soon as the
+/// browser is up; the browser itself carries the same `-profile`.
+pub fn wait_for_browser_pid(profiles_root: &Path, id: &str, timeout: Duration) -> Option<u32> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(found) = find_running_profiles(profiles_root) {
+            if let Some((pid, _)) = found.iter().find(|(_, found_id)| found_id == id) {
+                return Some(*pid);
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(600));
+    }
+}
+
+/// Close every process carrying this profile: post WM_CLOSE so Firefox flushes
+/// cookies/session, poll the known pids cheaply, then force what is left.
+pub fn close_profile_processes(profiles_root: &Path, id: &str) -> Result<(), String> {
+    let pids = profile_processes(profiles_root, id);
+    if pids.is_empty() {
+        return Ok(());
+    }
+    for pid in &pids {
+        post_close(*pid);
+        soft_kill(*pid);
+    }
+    // Firefox takes several seconds to shut down (session and cookie flush);
+    // poll the known pids, which costs one tasklist each, instead of
+    // re-scanning command lines.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        if pids.iter().all(|pid| !pid_alive(*pid)) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    for pid in profile_processes(profiles_root, id) {
+        let _ = kill_tree(pid);
+    }
+    Ok(())
 }
 
 pub type RunningMap = Mutex<HashMap<String, Running>>;
@@ -533,15 +666,36 @@ mod tests {
     }
 
     #[test]
+    fn pid_alive_sees_self_and_not_an_impossible_pid() {
+        assert!(pid_alive(std::process::id()));
+        assert!(!pid_alive(0x7FFF_FFF0));
+    }
+
+    #[test]
+    fn profile_arg_reads_quoted_and_bare_paths() {
+        assert_eq!(
+            profile_arg(r#""C:\k\camoufox.exe" -no-remote -profile "C:\d\profiles\p1\userdata""#),
+            Some(r"C:\d\profiles\p1\userdata".to_string())
+        );
+        assert_eq!(
+            profile_arg(r"C:\k\camoufox.exe -no-remote -profile C:\d\p2\userdata -silent"),
+            Some(r"C:\d\p2\userdata".to_string())
+        );
+        assert_eq!(profile_arg("camoufox.exe -no-remote"), None);
+    }
+
+    #[test]
     fn running_profile_scan_matches_profiles_root() {
         let root = std::env::temp_dir().join(format!("camfox-scan-{}", std::process::id()));
         let profiles = root.join("profiles");
         std::fs::create_dir_all(&profiles).unwrap();
+        let userdata = profiles.join("p1").join("userdata");
+        // Real browser command line: executable and profile path are quoted.
         let cim = format!(
-            r#"[{{"ProcessId": 100, "CommandLine": "k.exe -no-remote -profile {}\\p1\\userdata"}},
+            r#"[{{"ProcessId": 100, "CommandLine": "\"C:\\k\\camoufox.exe\" -no-remote -profile \"{}\""}},
                {{"ProcessId": 101, "CommandLine": "k.exe -profile C:\\Temp\\playwright_oth\\userdata"}},
                {{"ProcessId": 102, "CommandLine": "k.exe -no-remote"}}]"#,
-            profiles.to_string_lossy().replace('\\', "\\\\")
+            userdata.to_string_lossy().replace('\\', "\\\\")
         );
         let found = find_running_profiles_sync(&profiles, &cim);
         assert_eq!(found, vec![(100, "p1".to_string())]);

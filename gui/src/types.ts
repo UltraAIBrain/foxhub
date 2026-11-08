@@ -34,6 +34,7 @@ export interface Summary {
   fontsCount?: number | null;
   voicesCount?: number | null;
   mediaDevices?: number[] | null;
+  canvasCovered?: boolean | null;
 }
 
 export type WebrtcMode = "auto" | "block" | "custom";

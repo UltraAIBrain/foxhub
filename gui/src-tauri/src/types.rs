@@ -90,6 +90,10 @@ pub struct Summary {
     pub voices_count: Option<u32>,
     #[serde(default)]
     pub media_devices: Option<Vec<u32>>,
+    /// Canvas readback replaced with random data (identity cannot match the
+    /// host's renderer: another OS, another GPU, or an unrecorded GPU).
+    #[serde(default)]
+    pub canvas_covered: Option<bool>,
 }
 
 fn default_webrtc_mode() -> String {

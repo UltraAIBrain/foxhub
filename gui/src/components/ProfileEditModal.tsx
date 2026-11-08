@@ -488,7 +488,7 @@ export function ProfileEditModal(props: {
                           </Descriptions.Item>
                         </Descriptions>
                         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
-                          {t.canvasNote}
+                          {summary.canvasCovered ? t.canvasCoveredNote : t.canvasNote}
                         </Typography.Paragraph>
                       </div>
                     ) : (

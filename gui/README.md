@@ -30,9 +30,14 @@ only copy of that logic.
   identity per environment; launch as many as the machine allows. The OS
   window is sized to the identity's claimed outer window (written into the
   profile's `xulstore.json` before each launch), so the real window matches
-  what the machine claims. After a GUI restart, still-running browsers are
-  re-attached automatically so Close works on them again (a relaunched
-  authenticated-proxy profile is needed to restore its proxy forwarder).
+  what the machine claims. On Windows the spawned executable is a launcher
+  that hands off to the browser process, so liveness is tracked by the
+  process carrying the profile path, not by the spawned pid. Closing posts
+  WM_CLOSE first and only forces after a 20-second grace, which lets Firefox
+  flush cookies and session state. After a GUI restart, still-running
+  browsers are re-attached automatically so Close works on them again (a
+  relaunched authenticated-proxy profile is needed to restore its proxy
+  forwarder).
 - **Proxies** — HTTP / SOCKS5 per environment, with or without credentials.
   Authenticated proxies are served through a local SOCKS5 forwarder (Rust,
   in-process) that injects the credentials upstream; the browser only ever

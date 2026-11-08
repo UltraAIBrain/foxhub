@@ -3,7 +3,7 @@ without the package installed."""
 
 import hashlib
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 
 def decode_chunks(env: Dict[str, str], prefix: str) -> Optional[str]:
@@ -42,6 +42,18 @@ def identity_id(config: Dict[str, Any]) -> str:
     """
     blob = json.dumps(config, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def canvas_covered(prefs: Mapping[str, Any]) -> bool:
+    """Whether the launcher turned on RFP's canvas placeholder.
+
+    Upstream covers the canvas when the identity cannot match what the host
+    really renders (another OS, another GPU, or a GPU fpgen never recorded);
+    the readback is then random per draw, unlike the uncovered host-parity
+    path whose pixels are fixed.
+    """
+    overrides = str(prefs.get("privacy.baselineFingerprintingProtection.overrides") or "")
+    return "CanvasImageExtractionPrompt" in overrides
 
 
 def summary(config: Dict[str, Any]) -> Dict[str, Any]:
