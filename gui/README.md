@@ -129,6 +129,13 @@ endpoint) are manual; see the checklist below.
 
 ## Known limitations
 
+- Generating a fingerprint probes the host GPU by really launching the kernel
+  headed once (two windows flash for a few seconds). The sidecar caches the
+  probe result on disk (invalidated by a kernel change, 30-day TTL), so the
+  flash happens once per kernel build; later saves and random-mode launches
+  read the cache. The probe must run in the same display mode as the real
+  launch — a headless probe would report a different renderer and break
+  canvas coherence — so it cannot be hidden.
 - Dev builds need the Python interpreter and the `camoufox` package
   installed on the machine (fingerprint generation needs its data files);
   packaged releases carry a frozen sidecar instead.

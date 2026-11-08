@@ -32,6 +32,12 @@ def prepare(req: Dict[str, Any]) -> Dict[str, Any]:
     except CamoufoxNotInstalled as exc:
         raise RuntimeError(f"kernel-not-installed: {exc}") from exc
 
+    # Serve the headed host-GPU probe from disk after the first run, so the
+    # kernel window does not flash on every profile save or random launch.
+    from .host_gpu_cache import install
+
+    install()
+
     kwargs: Dict[str, Any] = {"headless": False, "i_know_what_im_doing": True}
     if req.get("os"):
         kwargs["os"] = req["os"]
