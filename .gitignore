@@ -88,3 +88,14 @@ checks-bundle.js
 # committed: this is where a stealth run's output lands, and an evidence
 # file in a public repository is permanent.
 .ci-work/
+
+# CamFox GUI (Tauri app)
+gui/node_modules/
+gui/dist/
+gui/src-tauri/target/
+gui/src-tauri/gen/
+
+# Agent tooling workspace artifacts
+.mimosa/
+.zcode/
+python/src/camoufox/.mimosa/

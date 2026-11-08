@@ -1,0 +1,28 @@
+[package]
+name = "camfox-gui"
+version = "0.1.0"
+description = "CamFox — fingerprint browser control panel for Camoufox"
+edition = "2021"
+
+[lib]
+name = "camfox_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+base64 = "0.22"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

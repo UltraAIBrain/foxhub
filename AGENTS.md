@@ -136,6 +136,7 @@ persist a change there as a patch, never as an edit to that tree.
 | `typescript/` | The `camoufox` npm package, a port of the Python launcher. |
 | `ci/` | The test pipeline (below). `ci/tribal-rules.yml` holds the settled decisions. |
 | `docs/` | Design notes and maintenance guides. |
+| `gui/` | The `CamFox` desktop app: a Tauri 2 control panel for managing and multi-opening fingerprint environments. Its Rust backend never draws identities — fingerprint generation goes through the Python sidecar (`gui/sidecar/`), which wraps the `camoufox` package. See [`gui/README.md`](gui/README.md). |
 
 ## Building
 
