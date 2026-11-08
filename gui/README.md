@@ -19,7 +19,13 @@ only copy of that logic.
 - **Fingerprints** — OS, screen, window size, locale, timezone and proxy are
   drawn as one coherent identity via `camoufox.utils.launch_options`
   (fpgen, coherence, fonts, voices, WebGL, media devices). Fixed identity per
-  profile, or redraw on every launch.
+  profile, or redraw on every launch. The edit panel shows the resolved
+  identity (UA, platform, screen, GPU, locale, timezone, fonts/voices, media
+  devices) plus a stable **identity ID** — the hash of the frozen config, so
+  the user can prove every launch of a profile is the same machine.
+- **WebRTC** — per environment: follow the identity (with GeoIP it advertises
+  the proxy exit IP), block WebRTC entirely, or pin a specific IPv4 (IPv6
+  candidates disabled). GeoIP works with or without a proxy.
 - **Multi-open isolation** — one process + one profile directory + one
   identity per environment; launch as many as the machine allows.
 - **Proxies** — HTTP / SOCKS5 per environment, with or without credentials.
@@ -129,6 +135,15 @@ endpoint) are manual; see the checklist below.
 
 ## Known limitations
 
+- **Canvas fingerprint stability.** Canvas *pixels* are fixed by the identity
+  and are bit-identical on every launch of a profile (verified: two launches
+  of the same frozen identity, no differing pixels). `toDataURL()` /
+  `toBlob()` bytes still differ per session because stock Firefox appends a
+  per-session random `deBG` chunk to the PNG — measured identically on a
+  stock Mozilla Firefox build. Sites that hash the decoded pixels see a
+  stable canvas; sites that hash the whole PNG string see the same per-session
+  change every Firefox user has. Removing that chunk would deviate from stock
+  Firefox and become its own fingerprint, so it is deliberately kept.
 - Generating a fingerprint probes the host GPU by really launching the kernel
   headed once (two windows flash for a few seconds). The sidecar caches the
   probe result on disk (invalidated by a kernel change, 30-day TTL), so the

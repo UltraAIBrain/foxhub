@@ -48,13 +48,15 @@ def prepare(req: Dict[str, Any]) -> Dict[str, Any]:
         kwargs["window"] = (int(req["window"]["width"]), int(req["window"]["height"]))
     if req.get("locale"):
         kwargs["locale"] = req["locale"]
-    if req.get("timezone"):
+    if req.get("timezone") and not req.get("geoip"):
+        # GeoIP owns the timezone; a caller value alongside it contradicts it.
         kwargs.setdefault("config", {})["timezone"] = req["timezone"]
     if req.get("geoip"):
         kwargs["geoip"] = True
     proxy = proxy_kwarg(req.get("proxy") or {})
     if proxy:
         kwargs["proxy"] = proxy
+    _apply_webrtc(req.get("webrtc") or {}, kwargs)
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -78,6 +80,31 @@ def prepare(req: Dict[str, Any]) -> Dict[str, Any]:
         "summary": summary(config),
         "warnings": _collect_warnings(list(caught)),
     }
+
+
+def _apply_webrtc(spec: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
+    """Map the GUI's WebRTC choice onto launch_options.
+
+    auto: leave WebRTC to the identity (Camoufox's hardening prefs stay, and
+    geoip pins the advertised address to the exit IP). block: no peer
+    connections at all. custom: present this IPv4 in ICE candidates.
+    """
+    mode = spec.get("mode") or "auto"
+    if mode == "block":
+        kwargs["block_webrtc"] = True
+    elif mode == "custom":
+        ip = (spec.get("ipv4") or "").strip()
+        if not ip:
+            raise ValueError("WebRTC mode 'custom' needs an IPv4 address")
+        from camoufox.ip import valid_ipv4
+
+        if not valid_ipv4(ip):
+            raise ValueError(f"invalid WebRTC IPv4 address: {ip!r}")
+        kwargs.setdefault("config", {})["webrtc:ipv4"] = ip
+        # A single-address identity must not advertise IPv6 candidates.
+        kwargs["config"]["network:ipv4Only"] = True
+    elif mode != "auto":
+        raise ValueError(f"unknown WebRTC mode: {mode!r}")
 
 
 def kwargs_for_automation(req: Dict[str, Any]) -> Dict[str, Any]:

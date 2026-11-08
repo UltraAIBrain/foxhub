@@ -14,11 +14,12 @@ import {
   Space,
   Switch,
   Tabs,
+  Typography,
 } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import { api } from "../api";
 import { useT } from "../i18n";
-import type { Profile, ProxyCheckResult } from "../types";
+import type { Profile, ProxyCheckResult, WebrtcMode } from "../types";
 import { emptyProfile } from "../types";
 
 const SCREEN_PRESETS: { label: string; value: string }[] = [
@@ -65,6 +66,8 @@ interface FormValues {
   locale?: string;
   timezone?: string;
   geoip: boolean;
+  webrtcMode: WebrtcMode;
+  webrtcIpv4?: string;
   proxyKind: Profile["proxy"]["kind"];
   proxyHost?: string;
   proxyPort?: number;
@@ -73,11 +76,48 @@ interface FormValues {
   automation: boolean;
 }
 
+/** Host values used to prefill a new profile, so nothing starts as a blank
+ * "auto" the user cannot see the meaning of. */
+function hostDefaults(): Partial<FormValues> {
+  const ua = navigator.userAgent;
+  const os = /Mac/i.test(ua) ? "macos" : /Win/i.test(ua) ? "windows" : "linux";
+  const locale = navigator.language || "en-US";
+  let timezone: string | undefined;
+  try {
+    timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch {
+    timezone = undefined;
+  }
+  const screen = `${window.screen.width}x${window.screen.height}`;
+  return {
+    os,
+    locale,
+    timezone,
+    screen: SCREEN_PRESETS.some((s) => s.value === screen) ? screen : undefined,
+  };
+}
+
 function parseSize(value: string | undefined): { width: number; height: number } | null {
   if (!value) return null;
   const [w, h] = value.split("x").map((n) => parseInt(n, 10));
   if (!w || !h) return null;
   return { width: w, height: h };
+}
+
+/** Fields that describe the presented machine; changing any of them requires
+ * a fresh identity draw. */
+function identitySignature(p: Profile): string {
+  return JSON.stringify({
+    os: p.os,
+    screen: p.screen,
+    window: p.window,
+    locale: p.locale,
+    timezone: p.timezone,
+    geoip: p.geoip,
+    webrtcMode: p.webrtcMode,
+    webrtcIpv4: p.webrtcIpv4,
+    proxy: p.proxy,
+  });
 }
 
 function toFormValues(p: Profile): FormValues {
@@ -93,6 +133,8 @@ function toFormValues(p: Profile): FormValues {
     locale: p.locale ?? undefined,
     timezone: p.timezone ?? undefined,
     geoip: p.geoip,
+    webrtcMode: p.webrtcMode ?? "auto",
+    webrtcIpv4: p.webrtcIpv4 || undefined,
     proxyKind: p.proxy.kind,
     proxyHost: p.proxy.host || undefined,
     proxyPort: p.proxy.port || undefined,
@@ -115,13 +157,20 @@ export function ProfileEditModal(props: {
   const [checking, setChecking] = useState(false);
   const [proxyResult, setProxyResult] = useState<ProxyCheckResult | null>(null);
   const [summary, setSummary] = useState<Profile["summary"]>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
   const proxyKind = Form.useWatch("proxyKind", form);
+  const webrtcMode = Form.useWatch("webrtcMode", form);
 
   useEffect(() => {
     if (!props.open) return;
-    const base = props.profile ?? emptyProfile();
-    form.setFieldsValue(toFormValues(base));
-    setSummary(base.summary ?? null);
+    if (props.profile) {
+      form.setFieldsValue(toFormValues(props.profile));
+      setSummary(props.profile.summary ?? null);
+    } else {
+      // New profile: start from the host, not from blank auto fields.
+      form.setFieldsValue({ ...toFormValues(emptyProfile()), ...hostDefaults() });
+      setSummary(null);
+    }
     setProxyResult(null);
   }, [props.open, props.profile, form]);
 
@@ -140,6 +189,8 @@ export function ProfileEditModal(props: {
     locale: values.locale ?? null,
     timezone: values.timezone ?? null,
     geoip: values.geoip,
+    webrtcMode: values.webrtcMode,
+    webrtcIpv4: values.webrtcMode === "custom" ? values.webrtcIpv4 ?? "" : "",
     automation: values.automation,
     proxy: {
       kind: values.proxyKind,
@@ -178,12 +229,21 @@ export function ProfileEditModal(props: {
     try {
       const isNew = !props.profile?.id;
       const saved = await api.saveProfile(buildProfile(props.profile ?? emptyProfile(), values));
-      // A new profile draws its identity immediately so it is launch-ready.
-      if (isNew) {
+      // The stored identity is frozen; anything that describes the machine
+      // must be drawn again, or the form would claim values the browser does
+      // not present.
+      const needsRegen =
+        isNew ||
+        (props.profile
+          ? identitySignature(saved) !== identitySignature(props.profile)
+          : false) ||
+        (saved.fingerprintMode === "fixed" && props.profile?.fingerprintMode === "random");
+      if (needsRegen) {
         message.loading({ content: t.generating, key: "prepare", duration: 0 });
         try {
           const prepared = await api.prepareProfile(saved.id);
-          setSummary(prepared.summary ?? null);
+          setSummary(prepared.profile.summary ?? null);
+          setWarnings(prepared.warnings);
           message.success({ content: t.save, key: "prepare" });
         } catch (e) {
           message.error({ content: String(e), key: "prepare" });
@@ -207,7 +267,8 @@ export function ProfileEditModal(props: {
     message.loading({ content: t.generating, key: "prepare", duration: 0 });
     try {
       const prepared = await api.prepareProfile(props.profile.id);
-      setSummary(prepared.summary ?? null);
+      setSummary(prepared.profile.summary ?? null);
+      setWarnings(prepared.warnings);
       message.success({ content: t.regenerate, key: "prepare" });
       props.onSaved();
     } catch (e) {
@@ -267,7 +328,15 @@ export function ProfileEditModal(props: {
               forceRender: true,
               children: (
                 <>
-                  <Form.Item name="fingerprintMode" label={t.fieldMode}>
+                  <Form.Item
+                    name="fingerprintMode"
+                    label={t.fieldMode}
+                    extra={
+                      <span style={{ fontSize: 12 }}>
+                        {t.modeFixedHint} {t.modeRandomHint}
+                      </span>
+                    }
+                  >
                     <Radio.Group
                       options={[
                         { label: t.modeFixed, value: "fixed" },
@@ -281,7 +350,7 @@ export function ProfileEditModal(props: {
                       <Select
                         style={{ width: 160 }}
                         allowClear
-                        placeholder="auto"
+                        placeholder={t.auto}
                         options={[
                           { label: "Windows", value: "windows" },
                           { label: "macOS", value: "macos" },
@@ -289,10 +358,15 @@ export function ProfileEditModal(props: {
                         ]}
                       />
                     </Form.Item>
-                    <Form.Item name="screen" label={t.fieldScreen}>
-                      <Select style={{ width: 180 }} allowClear placeholder="auto" options={SCREEN_PRESETS} />
+                    <Form.Item name="screen" label={t.fieldScreen} extra={t.fieldScreenHint}>
+                      <Select
+                        style={{ width: 180 }}
+                        allowClear
+                        placeholder={`${t.auto} (${window.screen.width}×${window.screen.height})`}
+                        options={SCREEN_PRESETS}
+                      />
                     </Form.Item>
-                    <Form.Item label={t.fieldWindow} style={{ marginBottom: 0 }}>
+                    <Form.Item label={t.fieldWindow} extra={t.windowHint}>
                       <Space.Compact>
                         <Form.Item name="windowWidth" noStyle>
                           <InputNumber placeholder="width" min={400} max={3840} style={{ width: 110 }} />
@@ -305,41 +379,120 @@ export function ProfileEditModal(props: {
                   </Space>
                   <Space size="large" wrap>
                     <Form.Item name="locale" label={t.fieldLocale}>
-                      <Select style={{ width: 160 }} allowClear placeholder="auto" options={LOCALE_OPTIONS} showSearch />
+                      <Select
+                        style={{ width: 170 }}
+                        allowClear
+                        placeholder={t.auto}
+                        options={LOCALE_OPTIONS}
+                        showSearch
+                      />
                     </Form.Item>
                     <Form.Item name="timezone" label={t.fieldTimezone}>
                       <Select
-                        style={{ width: 220 }}
+                        style={{ width: 230 }}
                         allowClear
-                        placeholder="auto"
+                        placeholder={
+                          Intl.DateTimeFormat().resolvedOptions().timeZone || t.auto
+                        }
                         options={TIMEZONE_OPTIONS}
                         showSearch
                       />
                     </Form.Item>
                   </Space>
-                  <Form.Item name="geoip" label={t.fieldGeoip} valuePropName="checked">
-                    <Switch disabled={!hasProxy} />
+                  <Form.Item name="geoip" label={t.fieldGeoip} valuePropName="checked" extra={t.geoipHint}>
+                    <Switch />
                   </Form.Item>
-                  <Space direction="vertical" style={{ width: "100%" }}>
-                    <Button icon={<ReloadOutlined />} loading={saving} onClick={handleRegenerate}>
-                      {t.regenerate}
-                    </Button>
-                    {summary && (
+                  <Form.Item name="webrtcMode" label={t.webrtcMode}>
+                    <Radio.Group
+                      optionType="button"
+                      options={[
+                        { label: t.webrtcAuto, value: "auto" },
+                        { label: t.webrtcBlock, value: "block" },
+                        { label: t.webrtcCustom, value: "custom" },
+                      ]}
+                    />
+                  </Form.Item>
+                  {webrtcMode === "auto" && (
+                    <Alert style={{ marginBottom: 12 }} type="info" showIcon message={t.webrtcAutoHint} />
+                  )}
+                  {webrtcMode === "block" && (
+                    <Alert style={{ marginBottom: 12 }} type="warning" showIcon message={t.webrtcBlockHint} />
+                  )}
+                  {webrtcMode === "custom" && (
+                    <>
+                      <Form.Item
+                        name="webrtcIpv4"
+                        label={t.webrtcIpv4}
+                        rules={[{ required: true, pattern: /^\d{1,3}(\.\d{1,3}){3}$/ }]}
+                        extra={t.webrtcCustomHint}
+                      >
+                        <Input style={{ width: 220 }} placeholder="203.0.113.10" />
+                      </Form.Item>
+                    </>
+                  )}
+                  <Space direction="vertical" style={{ width: "100%" }} size="middle">
+                    <Space>
+                      <Button icon={<ReloadOutlined />} loading={saving} onClick={handleRegenerate}>
+                        {t.regenerate}
+                      </Button>
+                      {summary && (
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }} copyable>
+                          {t.identityId}: {summary.identityId}
+                        </Typography.Text>
+                      )}
+                    </Space>
+                    {warnings.length > 0 && (
+                      <Alert
+                        type="warning"
+                        showIcon
+                        message={warnings.join("\n")}
+                        style={{ whiteSpace: "pre-wrap" }}
+                      />
+                    )}
+                    {summary ? (
                       <div className="camfox-fingerprint-preview">
                         <Descriptions size="small" column={2} title={t.fingerprintInfo}>
                           <Descriptions.Item label="UA" span={2}>
-                            {summary.ua ?? "—"}
+                            <Typography.Text style={{ fontSize: 12 }} copyable>
+                              {summary.ua ?? "—"}
+                            </Typography.Text>
                           </Descriptions.Item>
                           <Descriptions.Item label="Platform">{summary.platform ?? "—"}</Descriptions.Item>
+                          <Descriptions.Item label={t.fieldOs}>{summary.oscpu ?? "—"}</Descriptions.Item>
                           <Descriptions.Item label={t.fieldScreen}>
                             {summary.screen ? `${summary.screen[0]}×${summary.screen[1]}` : "—"}
+                            {summary.availScreen?.[1] ? ` (可用 ${summary.availScreen[1]})` : ""}
                           </Descriptions.Item>
+                          <Descriptions.Item label={t.fieldColorDepth}>{summary.colorDepth ?? "—"}</Descriptions.Item>
                           <Descriptions.Item label={t.fieldTimezone}>{summary.timezone ?? "—"}</Descriptions.Item>
                           <Descriptions.Item label={t.fieldLocale}>{summary.locale ?? "—"}</Descriptions.Item>
-                          <Descriptions.Item label="IP">{summary.ip ?? "—"}</Descriptions.Item>
-                          <Descriptions.Item label="Cores">{summary.hardwareConcurrency ?? "—"}</Descriptions.Item>
+                          <Descriptions.Item label="Cores / DPR">
+                            {summary.hardwareConcurrency ?? "—"} / {summary.devicePixelRatio ?? "—"}
+                          </Descriptions.Item>
+                          <Descriptions.Item label={t.webrtcFollows}>
+                            {summary.webrtcIpv4 ?? t.none}
+                          </Descriptions.Item>
+                          <Descriptions.Item label={t.gpu} span={2}>
+                            <Typography.Text style={{ fontSize: 12 }}>
+                              {summary.gpuRenderer ?? "—"}
+                            </Typography.Text>
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                              {" "}
+                              ({summary.gpuVendor ?? "—"})
+                            </Typography.Text>
+                          </Descriptions.Item>
+                          <Descriptions.Item label={t.fonts}>{summary.fontsCount ?? 0}</Descriptions.Item>
+                          <Descriptions.Item label={t.voices}>{summary.voicesCount ?? 0}</Descriptions.Item>
+                          <Descriptions.Item label={t.mediaDevices} span={2}>
+                            {summary.mediaDevices?.join(" / ") ?? "—"} <Typography.Text type="secondary">({t.mediaUnits})</Typography.Text>
+                          </Descriptions.Item>
                         </Descriptions>
+                        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
+                          {t.canvasNote}
+                        </Typography.Paragraph>
                       </div>
+                    ) : (
+                      <Alert type="info" showIcon message={t.identityIdHint} />
                     )}
                   </Space>
                 </>

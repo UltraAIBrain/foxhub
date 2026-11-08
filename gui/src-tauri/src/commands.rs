@@ -12,7 +12,7 @@ use crate::launch::{self, Running, RunningMap};
 use crate::settings::Settings;
 use crate::sidecar::{resolve_sidecar, Sidecar, SidecarProgram};
 use crate::store::{new_id, Store};
-use crate::types::{Profile, ProxyCheck, ProxyConfig, RunningInfo};
+use crate::types::{PrepareResult, Profile, ProxyCheck, ProxyConfig, RunningInfo};
 
 pub struct AppState {
     pub store: Store,
@@ -151,9 +151,17 @@ pub async fn prepare_profile(
     id: String,
     state: State<'_, AppState>,
     app: AppHandle,
-) -> Result<Profile, String> {
+) -> Result<PrepareResult, String> {
+    prepare_profile_inner(id, &state, &app).await
+}
+
+pub async fn prepare_profile_inner(
+    id: String,
+    state: &AppState,
+    app: &AppHandle,
+) -> Result<PrepareResult, String> {
     let mut profile = state.store.get(&id)?;
-    let sidecar = state.sidecar(&app)?;
+    let sidecar = state.sidecar(app)?;
     let req = profile.to_prepare_request();
     let response = tauri::async_runtime::spawn_blocking(move || {
         sidecar.call("prepare", &req, Duration::from_secs(300))
@@ -190,8 +198,18 @@ pub async fn prepare_profile(
         .get("summary")
         .cloned()
         .and_then(|s| serde_json::from_value(s).ok());
+    let warnings = response
+        .get("warnings")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     state.store.save(&profile)?;
-    Ok(profile)
+    Ok(PrepareResult { profile, warnings })
 }
 
 #[tauri::command]
@@ -207,7 +225,7 @@ pub async fn launch_profile(
 
     // Random mode (or a profile without a stored identity) draws fresh here.
     if profile.config.is_none() || profile.fingerprint_mode == "random" {
-        profile = prepare_profile(id.clone(), state.clone(), app.clone()).await?;
+        profile = prepare_profile_inner(id.clone(), &state, &app).await?.profile;
     }
 
     let executable = {

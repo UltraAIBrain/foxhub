@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   KernelInfo,
+  PrepareResult,
   Profile,
   ProxyCheckResult,
   ProxyConfig,
@@ -14,7 +15,7 @@ export const api = {
   saveProfile: (profile: Profile) => invoke<Profile>("save_profile", { profile }),
   deleteProfile: (id: string) => invoke<void>("delete_profile", { id }),
   duplicateProfile: (id: string) => invoke<Profile>("duplicate_profile", { id }),
-  prepareProfile: (id: string) => invoke<Profile>("prepare_profile", { id }),
+  prepareProfile: (id: string) => invoke<PrepareResult>("prepare_profile", { id }),
   launchProfile: (id: string) => invoke<void>("launch_profile", { id }),
   closeProfile: (id: string) => invoke<void>("close_profile", { id }),
   runningProfiles: () => invoke<RunningInfo[]>("running_profiles"),

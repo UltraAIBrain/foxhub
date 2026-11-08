@@ -14,17 +14,29 @@ export interface ProxyConfig {
 }
 
 export interface Summary {
+  identityId?: string | null;
   ua?: string | null;
   platform?: string | null;
+  oscpu?: string | null;
   screen?: number[] | null;
+  availScreen?: number[] | null;
   window?: number[] | null;
+  innerWindow?: number[] | null;
+  colorDepth?: number | null;
   timezone?: string | null;
   locale?: string | null;
   webrtcIpv4?: string | null;
   ip?: string | null;
   hardwareConcurrency?: number | null;
   devicePixelRatio?: number | null;
+  gpuVendor?: string | null;
+  gpuRenderer?: string | null;
+  fontsCount?: number | null;
+  voicesCount?: number | null;
+  mediaDevices?: number[] | null;
 }
+
+export type WebrtcMode = "auto" | "block" | "custom";
 
 export interface Profile {
   id: string;
@@ -41,6 +53,8 @@ export interface Profile {
   locale: string | null;
   timezone: string | null;
   geoip: boolean;
+  webrtcMode: WebrtcMode;
+  webrtcIpv4: string;
   proxy: ProxyConfig;
   automation: boolean;
   config?: object | null;
@@ -49,6 +63,12 @@ export interface Profile {
   launchArgs: string[];
   extraEnv: Record<string, string>;
   summary?: Summary | null;
+}
+
+export interface PrepareResult {
+  profile: Profile;
+  /** LeakWarnings/FallbackWarnings from the launcher pipeline. */
+  warnings: string[];
 }
 
 export interface RunningInfo {
@@ -120,6 +140,8 @@ export function emptyProfile(): Profile {
     locale: null,
     timezone: null,
     geoip: false,
+    webrtcMode: "auto",
+    webrtcIpv4: "",
     proxy: emptyProxy(),
     automation: false,
     config: null,

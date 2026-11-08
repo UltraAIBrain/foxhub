@@ -51,13 +51,23 @@ impl ProxyConfig {
 #[serde(rename_all = "camelCase")]
 pub struct Summary {
     #[serde(default)]
+    pub identity_id: Option<String>,
+    #[serde(default)]
     pub ua: Option<String>,
     #[serde(default)]
     pub platform: Option<String>,
     #[serde(default)]
+    pub oscpu: Option<String>,
+    #[serde(default)]
     pub screen: Option<Vec<u32>>,
     #[serde(default)]
+    pub avail_screen: Option<Vec<u32>>,
+    #[serde(default)]
     pub window: Option<Vec<u32>>,
+    #[serde(default)]
+    pub inner_window: Option<Vec<u32>>,
+    #[serde(default)]
+    pub color_depth: Option<u32>,
     #[serde(default)]
     pub timezone: Option<String>,
     #[serde(default)]
@@ -70,6 +80,16 @@ pub struct Summary {
     pub hardware_concurrency: Option<u32>,
     #[serde(default)]
     pub device_pixel_ratio: Option<f64>,
+    #[serde(default)]
+    pub gpu_vendor: Option<String>,
+    #[serde(default)]
+    pub gpu_renderer: Option<String>,
+    #[serde(default)]
+    pub fonts_count: Option<u32>,
+    #[serde(default)]
+    pub voices_count: Option<u32>,
+    #[serde(default)]
+    pub media_devices: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -91,6 +111,9 @@ pub struct Profile {
     pub locale: Option<String>,
     pub timezone: Option<String>,
     pub geoip: bool,
+    /// "auto" | "block" | "custom"
+    pub webrtc_mode: String,
+    pub webrtc_ipv4: String,
     pub proxy: ProxyConfig,
     pub automation: bool,
     /// The identity the browser reads via CAMOU_CONFIG_* (sidecar output).
@@ -120,6 +143,8 @@ impl Default for Profile {
             locale: None,
             timezone: None,
             geoip: false,
+            webrtc_mode: "auto".into(),
+            webrtc_ipv4: String::new(),
             proxy: ProxyConfig::default(),
             automation: false,
             config: None,
@@ -142,6 +167,10 @@ impl Profile {
             "locale": self.locale,
             "timezone": self.timezone,
             "geoip": self.geoip,
+            "webrtc": {
+                "mode": self.webrtc_mode,
+                "ipv4": self.webrtc_ipv4,
+            },
             "proxy": {
                 "kind": self.proxy.kind,
                 "host": self.proxy.host,
@@ -168,6 +197,14 @@ impl Profile {
             },
         })
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareResult {
+    pub profile: Profile,
+    /// LeakWarnings/FallbackWarnings from the launcher, shown to the user.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
