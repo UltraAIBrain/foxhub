@@ -99,3 +99,8 @@ gui/src-tauri/gen/
 .mimosa/
 .zcode/
 python/src/camoufox/.mimosa/
+
+# Frozen sidecar build artifacts (rebuild with gui/sidecar/camfox_sidecar.spec)
+gui/src-tauri/resources/camfox-sidecar/*
+!gui/src-tauri/resources/camfox-sidecar/.gitkeep
+gui/sidecar/build/

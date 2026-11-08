@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::forwarder;
 use crate::launch::{self, Running, RunningMap};
 use crate::settings::Settings;
-use crate::sidecar::{resolve_sidecar_dir, Sidecar};
+use crate::sidecar::{resolve_sidecar, Sidecar, SidecarProgram};
 use crate::store::{new_id, Store};
 use crate::types::{Profile, ProxyCheck, ProxyConfig, RunningInfo};
 
@@ -41,14 +41,18 @@ impl AppState {
     pub fn sidecar(&self, app: &AppHandle) -> Result<Sidecar, String> {
         let settings = self.settings();
         let resource_dir = app.path().resource_dir().ok();
-        let dir = resolve_sidecar_dir(settings.sidecar_dir().as_deref(), resource_dir.as_deref())
+        let mut program = resolve_sidecar(settings.sidecar_dir().as_deref(), resource_dir.as_deref())
             .ok_or_else(|| {
-                "sidecar directory not found — point Settings at gui/sidecar".to_string()
+                "sidecar not found — in dev builds point Settings at gui/sidecar".to_string()
             })?;
-        Ok(Sidecar {
-            python: settings.python_path.clone(),
-            dir,
-        })
+        if let SidecarProgram::Source { python, .. } = &mut program {
+            // The frozen build ignores the interpreter; the source build needs
+            // one with the camoufox package installed.
+            if python.is_empty() {
+                *python = settings.python_path.clone();
+            }
+        }
+        Ok(Sidecar { program })
     }
 
     pub fn is_running(&self, id: &str) -> bool {

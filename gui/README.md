@@ -71,6 +71,31 @@ pnpm tauri dev
 The sidecar is found automatically at `gui/sidecar` in dev builds. Point
 Settings → Sidecar directory elsewhere only if you move it.
 
+## Packaging (self-contained installer)
+
+The release app bundles the sidecar as a frozen PyInstaller build
+(`camfox-sidecar.exe` + `_internal`), so end users need **no Python
+installed**. The browser kernel itself is not bundled (2+ GB); it is
+downloaded in-app on first run (Kernel Management page or `camoufox fetch`).
+
+Build steps, from `gui/`, with the interpreter that has `camoufox[geoip]`,
+playwright and pyinstaller installed:
+
+```bash
+cd sidecar
+python -m PyInstaller camfox_sidecar.spec --noconfirm \
+    --distpath ../src-tauri/resources --workpath build
+cd ..
+pnpm tauri build
+```
+
+The installer lands in `src-tauri/target/release/bundle/nsis/`. The frozen
+sidecar is rebuilt from the spec whenever the launcher package or the
+sidecar changes; a stale build silently runs old fingerprint logic.
+
+`src-tauri/resources/camfox-sidecar/.gitkeep` keeps the resource path valid
+for dev builds before the first frozen build exists.
+
 ## Tests
 
 ```bash
@@ -104,9 +129,9 @@ endpoint) are manual; see the checklist below.
 
 ## Known limitations
 
-- The Python interpreter and the `camoufox` package must be installed on the
-  machine (fingerprint generation needs its data files). Bundling the sidecar
-  as a frozen executable is future work.
+- Dev builds need the Python interpreter and the `camoufox` package
+  installed on the machine (fingerprint generation needs its data files);
+  packaged releases carry a frozen sidecar instead.
 - A fixed identity is frozen at generation time on that host: moving a profile
   to another machine leaves WebGL/canvas on the host-parity path (random
   canvas readback), exactly as the Python launcher behaves.
@@ -115,3 +140,6 @@ endpoint) are manual; see the checklist below.
   in that mode; use normal open + cookie export for that.
 - Firefox cannot use authenticated proxies natively on a bare launch; the
   built-in forwarder covers it, and the browser itself only sees localhost.
+- The Microsoft Store Python is unsupported for dev builds: its AppData
+  virtualization hides the fetched kernel from every other process (see
+  Prerequisites).

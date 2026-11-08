@@ -3,6 +3,11 @@
 //! One subprocess per call: request JSON on stdin, the response is the last
 //! stdout line that parses as a JSON object with an "ok" key — everything else
 //! (camoufox's own progress output, warnings) is treated as log text.
+//!
+//! The sidecar runs either from source (`python -m camfox_sidecar`, dev) or
+//! as a PyInstaller-frozen `camfox-sidecar.exe` bundled as a resource
+//! (release), which is what makes the packaged app work without a system
+//! Python.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -10,15 +15,27 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-pub struct Sidecar {
-    pub python: String,
-    pub dir: PathBuf,
+/// What to spawn for sidecar calls.
+#[derive(Debug, Clone)]
+pub enum SidecarProgram {
+    /// Source layout: `<dir>/camfox_sidecar/__main__.py`, run with an
+    /// interpreter that has the `camoufox` package installed.
+    Source { python: String, dir: PathBuf },
+    /// Frozen PyInstaller onedir: `<exe>` plus its `_internal` payload.
+    Frozen { exe: PathBuf },
 }
 
-/// Where `gui/sidecar` lives, tried in order: explicit setting, env override,
-/// beside the executable (packaged layout), Tauri resource dir, the dev-tree
-/// location relative to this crate.
-pub fn resolve_sidecar_dir(explicit: Option<&Path>, resource_dir: Option<&Path>) -> Option<PathBuf> {
+pub const FROZEN_EXE_NAME: &str = "camfox-sidecar.exe";
+
+pub struct Sidecar {
+    pub program: SidecarProgram,
+}
+
+/// Locate the sidecar, preferring a frozen build. Directories probed in
+/// order: explicit setting, env override, beside the executable, the Tauri
+/// resource dir (with the `sidecar/` mapping from tauri.conf.json), and the
+/// compile-time dev-tree location.
+pub fn resolve_sidecar(explicit: Option<&Path>, resource_dir: Option<&Path>) -> Option<SidecarProgram> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(p) = explicit {
         candidates.push(p.to_path_buf());
@@ -34,14 +51,27 @@ pub fn resolve_sidecar_dir(explicit: Option<&Path>, resource_dir: Option<&Path>)
         }
     }
     if let Some(res) = resource_dir {
+        // Mapped in tauri.conf.json; cover both dir-copy interpretations.
         candidates.push(res.join("sidecar"));
+        candidates.push(res.join("sidecar").join("camfox-sidecar"));
     }
     // Compile-time dev-tree location: `pnpm tauri dev` runs the binary without
     // CARGO_MANIFEST_DIR in the environment.
     candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("sidecar"));
-    candidates
-        .into_iter()
-        .find(|dir| dir.join("camfox_sidecar").join("__main__.py").is_file())
+
+    for dir in candidates {
+        let frozen = dir.join(FROZEN_EXE_NAME);
+        if frozen.is_file() {
+            return Some(SidecarProgram::Frozen { exe: frozen });
+        }
+        if dir.join("camfox_sidecar").join("__main__.py").is_file() {
+            return Some(SidecarProgram::Source {
+                python: String::new(), // filled in by the caller
+                dir,
+            });
+        }
+    }
+    None
 }
 
 pub fn parse_output(text: &str) -> (Option<Value>, Vec<String>) {
@@ -81,11 +111,22 @@ impl Sidecar {
     }
 
     fn spawn(&self, cmd: &str, req: &Value) -> Result<std::process::Child, String> {
-        let mut command = Command::new(&self.python);
+        let mut command = match &self.program {
+            SidecarProgram::Frozen { exe } => {
+                let mut c = Command::new(exe);
+                c.current_dir(exe.parent().unwrap_or(Path::new(".")));
+                c
+            }
+            SidecarProgram::Source { python, dir } => {
+                let mut c = Command::new(python);
+                c.args(["-m", "camfox_sidecar"])
+                    .current_dir(dir)
+                    .env("PYTHONPATH", dir);
+                c
+            }
+        };
         command
-            .args(["-m", "camfox_sidecar", cmd])
-            .current_dir(&self.dir)
-            .env("PYTHONPATH", &self.dir)
+            .arg(cmd)
             .env("PYTHONIOENCODING", "utf-8")
             .env("PYTHONUTF8", "1")
             .stdin(Stdio::piped())
@@ -204,9 +245,24 @@ mod tests {
 
     #[test]
     fn resolve_dev_layout() {
-        // In this repo the dev tree location always exists.
-        let found = resolve_sidecar_dir(None, None);
-        assert!(found.is_some());
-        assert!(found.unwrap().join("camfox_sidecar").is_dir());
+        // In this repo the dev tree location always exists (source layout).
+        let found = resolve_sidecar(None, None);
+        assert!(matches!(found, Some(SidecarProgram::Source { .. })));
+    }
+
+    #[test]
+    fn frozen_exe_wins_when_present() {
+        let root = std::env::temp_dir().join(format!("camfox-sidecar-test-{}", std::process::id()));
+        let pkg = root.join("camfox_sidecar");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(root.join(FROZEN_EXE_NAME), b"mz").unwrap();
+        let found = resolve_sidecar(Some(&root), None);
+        match found {
+            Some(SidecarProgram::Frozen { exe }) => {
+                assert_eq!(exe, root.join(FROZEN_EXE_NAME))
+            }
+            other => panic!("expected frozen, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

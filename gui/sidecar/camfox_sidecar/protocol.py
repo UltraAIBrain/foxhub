@@ -15,6 +15,10 @@ from typing import Any, Callable, Dict
 Request = Dict[str, Any]
 Response = Dict[str, Any]
 
+# The protocol is UTF-8 JSON; never depend on the console codepage (GBK etc.).
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 
 def read_request() -> Request:
     raw = sys.stdin.read()
