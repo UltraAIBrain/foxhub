@@ -36,9 +36,11 @@ impl Store {
 
     pub fn list(&self) -> Result<Vec<Profile>, String> {
         let dir = self.profiles_dir();
+        // A fresh install has no profiles yet; create the dir on first read
+        // instead of erroring on the missing path.
+        fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let mut out = Vec::new();
-        let entries =
-            fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+        let entries = fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
         for entry in entries {
             let entry = entry.map_err(|e| e.to_string())?;
             let file = entry.path().join("profile.json");
@@ -171,6 +173,16 @@ mod tests {
         assert_eq!(listed[0].id, "bbb"); // newest first
         store.delete("aaa").unwrap();
         assert!(store.get("aaa").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn list_on_fresh_store_is_empty() {
+        // First run: the store was constructed but no profile was ever saved.
+        let root = tmp_root("fresh");
+        let store = Store::new(&root);
+        assert_eq!(store.list().unwrap(), Vec::<Profile>::new());
+        assert!(store.profiles_dir().exists());
         let _ = fs::remove_dir_all(&root);
     }
 
