@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
+use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -18,6 +19,9 @@ pub struct AppState {
     pub store: Store,
     pub settings: std::sync::Mutex<Settings>,
     pub running: RunningMap,
+    /// Profiles currently between "launch requested" and "process spawned";
+    /// blocks a second launch of the same profile during the slow draw.
+    pub launching: std::sync::Mutex<std::collections::HashSet<String>>,
     pub data_dir: std::path::PathBuf,
 }
 
@@ -28,6 +32,7 @@ impl AppState {
             store: Store::new(&data_dir),
             settings: std::sync::Mutex::new(settings),
             running: std::sync::Mutex::new(HashMap::new()),
+            launching: std::sync::Mutex::new(std::collections::HashSet::new()),
             data_dir,
         }
     }
@@ -221,11 +226,30 @@ pub async fn launch_profile(
     if state.is_running(&id) {
         return Err("profile is already running".into());
     }
-    let mut profile = state.store.get(&id)?;
+    // One draw at a time per profile: a double-clicked open button must not
+    // run two fingerprint generations and spawn two browsers.
+    if !state.launching.lock().unwrap().insert(id.clone()) {
+        return Err("profile is already launching".into());
+    }
+    AppState::emit_status(&app, &id, "launching", json!({}));
+    let result = launch_profile_inner(&id, &state, &app).await;
+    if result.is_err() {
+        state.launching.lock().unwrap().remove(&id);
+        AppState::emit_status(&app, &id, "failed", json!({ "error": result.clone().err() }));
+    }
+    result
+}
+
+async fn launch_profile_inner(
+    id: &str,
+    state: &State<'_, AppState>,
+    app: &AppHandle,
+) -> Result<(), String> {
+    let mut profile = state.store.get(id)?;
 
     // Random mode (or a profile without a stored identity) draws fresh here.
     if profile.config.is_none() || profile.fingerprint_mode == "random" {
-        profile = prepare_profile_inner(id.clone(), &state, &app).await?.profile;
+        profile = prepare_profile_inner(id.to_string(), state, app).await?.profile;
     }
 
     let executable = {
@@ -250,8 +274,17 @@ pub async fn launch_profile(
     };
     let local_port = forwarder_handle.as_ref().map(|f| f.port);
 
-    let userdata = state.store.userdata_dir(&id);
+    let userdata = state.store.userdata_dir(id);
     launch::prepare_userdata(&userdata)?;
+
+    // The OS window shows the identity's claimed geometry (see
+    // write_window_xulstore); without a stored config there is nothing to
+    // match, so Firefox keeps its remembered size.
+    if let Some(config) = &profile.config {
+        if let Some((w, h, x, y)) = launch::identity_window(config) {
+            launch::write_window_xulstore(&userdata, w, h, x, y)?;
+        }
+    }
 
     let mut child = launch::spawn_browser(&executable, &profile, &userdata, local_port)?;
     let pid = child.id();
@@ -260,18 +293,19 @@ pub async fn launch_profile(
     profile.launch_count += 1;
     state.store.save(&profile)?;
 
+    state.launching.lock().unwrap().remove(id);
     state.running.lock().unwrap().insert(
-        id.clone(),
+        id.to_string(),
         Running::Browser {
             pid,
             forwarder: forwarder_handle,
         },
     );
-    AppState::emit_status(&app, &id, "running", json!({ "pid": pid }));
+    AppState::emit_status(app, id, "running", json!({ "pid": pid }));
 
     // Exit watcher: clean up the forwarder and report the outcome.
     let app_handle = app.clone();
-    let watch_id = id.clone();
+    let watch_id = id.to_string();
     std::thread::spawn(move || {
         let _ = child.wait();
         if let Some(running) = app_handle
@@ -601,7 +635,7 @@ pub async fn import_profiles(
         }
         state.store.save(&profile)?;
         if regenerate {
-            prepare_profile(profile.id.clone(), state.clone(), app.clone()).await?;
+            prepare_profile_inner(profile.id.clone(), &state, &app).await?;
         }
         imported += 1;
     }
@@ -649,6 +683,99 @@ pub fn import_cookies(
         crate::cookies::FORMAT_NETSCAPE => crate::cookies::import_netscape(&userdata, &content),
         other => Err(format!("unknown cookie format: {other}")),
     }
+}
+
+// ------------------------------------------------- recovery and diagnostics
+
+/// Re-attach browsers the GUI lost track of (restart, crash): any kernel
+/// process whose `-profile` points at one of our userdata dirs is put back
+/// into the running map so Close works on it again. Note the per-profile
+/// proxy forwarder is process-local and cannot be recovered; an
+/// authenticated-proxy profile must be relaunched for traffic to flow.
+pub fn restore_running_browsers(app: &AppHandle) -> usize {
+    let state = app.state::<AppState>();
+    let profiles_root = state.store.profiles_dir();
+    let found = match launch::find_running_profiles(&profiles_root) {
+        Ok(f) => f,
+        Err(_) => return 0, // scan is best-effort
+    };
+    let mut restored = 0;
+    for (pid, id) in found {
+        if state.store.get(&id).is_err() || state.is_running(&id) {
+            continue;
+        }
+        state
+            .running
+            .lock()
+            .unwrap()
+            .insert(id.clone(), Running::Browser { pid, forwarder: None });
+        AppState::emit_status(app, &id, "running", json!({ "pid": pid, "recovered": true }));
+        restored += 1;
+    }
+    restored
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Diagnostics {
+    /// "frozen" (bundled sidecar exe) | "source" (python -m camfox_sidecar).
+    pub sidecar_mode: String,
+    pub sidecar_dir: Option<String>,
+    pub python: Option<String>,
+    pub kernel_version: Option<String>,
+    pub kernel_path: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Check the whole launch chain (sidecar resolution, interpreter, managed
+/// kernel) so a broken setup is diagnosable from Settings instead of failing
+/// obscurely on first launch.
+#[tauri::command]
+pub async fn diagnose(state: State<'_, AppState>, app: AppHandle) -> Result<Diagnostics, String> {
+    let settings = state.settings();
+    let resource_dir = app.path().resource_dir().ok();
+    let (mode, dir, python) = match resolve_sidecar(
+        settings.sidecar_dir().as_deref(),
+        resource_dir.as_deref(),
+    ) {
+        Some(SidecarProgram::Frozen { exe }) => (
+            "frozen".to_string(),
+            Some(exe.parent().map(|p| p.display().to_string()).unwrap_or_default()),
+            None,
+        ),
+        Some(SidecarProgram::Source { dir, .. }) => (
+            "source".to_string(),
+            Some(dir.display().to_string()),
+            Some(settings.python_path.clone()),
+        ),
+        None => {
+            return Ok(Diagnostics {
+                sidecar_mode: "not found".into(),
+                sidecar_dir: None,
+                python: Some(settings.python_path.clone()),
+                kernel_version: None,
+                kernel_path: None,
+                error: Some(
+                    "sidecar directory not found — set it in Settings (dev builds: gui/sidecar)"
+                        .into(),
+                ),
+            })
+        }
+    };
+    let sidecar = state.sidecar(&app)?;
+    let response = tauri::async_runtime::spawn_blocking(move || {
+        sidecar.call("kernel-info", &json!({}), Duration::from_secs(60))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(Diagnostics {
+        sidecar_mode: mode,
+        sidecar_dir: dir,
+        python,
+        kernel_version: response.get("version").and_then(Value::as_str).map(str::to_string),
+        kernel_path: response.get("activePath").and_then(Value::as_str).map(str::to_string),
+        error: None,
+    })
 }
 
 // ----------------------------------------------------------------- settings

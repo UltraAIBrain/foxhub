@@ -23,6 +23,12 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)
                 .map_err(|e| format!("cannot create data dir {}: {e}", data_dir.display()))?;
             app.manage(AppState::new(data_dir));
+            // Best-effort: browsers still running from a previous session are
+            // re-attached so the UI can close them again.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                commands::restore_running_browsers(&handle);
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -48,6 +54,7 @@ pub fn run() {
             commands::import_cookies,
             commands::get_settings,
             commands::save_settings,
+            commands::diagnose,
             commands::data_dir,
             commands::write_text_file,
             commands::read_text_file,

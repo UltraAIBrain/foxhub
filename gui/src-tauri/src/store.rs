@@ -9,16 +9,20 @@ use crate::types::Profile;
 
 pub struct Store {
     root: PathBuf,
+    /// Serializes read-modify-write cycles (launch counters vs. saves).
+    lock: std::sync::Mutex<()>,
 }
 
 impl Store {
     pub fn new(root: &Path) -> Store {
         Store {
             root: root.to_path_buf(),
+            lock: std::sync::Mutex::new(()),
         }
     }
 
-    fn profiles_dir(&self) -> PathBuf {
+    /// Where all profile directories live.
+    pub fn profiles_dir(&self) -> PathBuf {
         self.root.join("profiles")
     }
 
@@ -35,6 +39,7 @@ impl Store {
     }
 
     pub fn list(&self) -> Result<Vec<Profile>, String> {
+        let _guard = self.lock.lock().unwrap();
         let dir = self.profiles_dir();
         // A fresh install has no profiles yet; create the dir on first read
         // instead of erroring on the missing path.
@@ -55,6 +60,7 @@ impl Store {
     }
 
     pub fn get(&self, id: &str) -> Result<Profile, String> {
+        let _guard = self.lock.lock().unwrap();
         read_profile(&self.profile_file(id))
     }
 
@@ -71,6 +77,7 @@ impl Store {
     }
 
     pub fn save(&self, profile: &Profile) -> Result<(), String> {
+        let _guard = self.lock.lock().unwrap();
         Self::valid_id(&profile.id)?;
         let dir = self.profile_dir(&profile.id);
         fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
@@ -83,6 +90,7 @@ impl Store {
     }
 
     pub fn delete(&self, id: &str) -> Result<(), String> {
+        let _guard = self.lock.lock().unwrap();
         Self::valid_id(id)?;
         let dir = self.profile_dir(id);
         if !dir.exists() {

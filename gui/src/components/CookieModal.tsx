@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Alert, Button, Modal, Radio, Space } from "antd";
+import { Alert, Button, message, Modal, Radio, Space } from "antd";
 import { DownloadOutlined, UploadOutlined } from "@ant-design/icons";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
@@ -23,7 +23,10 @@ export function CookieModal(props: { profile: Profile; open: boolean; onClose: (
       if (!path) return;
       const content = await api.exportCookies(props.profile.id, format);
       await api.writeTextFile(path, content);
+      message.success(t.cookieExported);
       props.onClose();
+    } catch (e) {
+      message.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -41,8 +44,11 @@ export function CookieModal(props: { profile: Profile; open: boolean; onClose: (
       });
       if (!path) return;
       const content = await api.readTextFile(path);
-      await api.importCookies(props.profile.id, format, content);
+      const count = await api.importCookies(props.profile.id, format, content);
+      message.success(t.cookieImported.replace("{n}", String(count)));
       props.onClose();
+    } catch (e) {
+      message.error(String(e));
     } finally {
       setBusy(false);
     }

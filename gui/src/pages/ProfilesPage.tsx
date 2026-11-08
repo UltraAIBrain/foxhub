@@ -18,6 +18,7 @@ import {
   EditOutlined,
   ExportOutlined,
   ImportOutlined,
+  LoadingOutlined,
   PlayCircleFilled,
   PlusOutlined,
   StopOutlined,
@@ -194,6 +195,12 @@ export function ProfilesPage(props: { running: Record<string, RunningState> }) {
     const s = statusOf(p);
     if (!s) return <Tag>{t.statusClosed}</Tag>;
     switch (s.status) {
+      case "launching":
+        return (
+          <Tag color="orange" icon={<LoadingOutlined />}>
+            {t.statusLaunching}
+          </Tag>
+        );
       case "running":
         return <Tag color="green">{t.statusRunning}</Tag>;
       case "automation-connecting":
@@ -273,15 +280,28 @@ export function ProfilesPage(props: { running: Record<string, RunningState> }) {
       render: (_: unknown, p: Profile) => {
         const s = statusOf(p);
         const isRunning = !!s;
+        const isLaunching = s?.status === "launching";
         const isAutomation = s?.status === "automation-connecting" || s?.status === "automation-ready";
         return (
           <Space size={0} wrap>
             {isRunning ? (
-              <Button type="link" size="small" icon={<StopOutlined />} onClick={() => doClose(p)}>
+              <Button
+                type="link"
+                size="small"
+                icon={<StopOutlined />}
+                disabled={isLaunching}
+                onClick={() => doClose(p)}
+              >
                 {t.stop}
               </Button>
             ) : (
-              <Button type="link" size="small" icon={<PlayCircleFilled />} onClick={() => doLaunch(p)}>
+              <Button
+                type="link"
+                size="small"
+                icon={<PlayCircleFilled />}
+                disabled={isLaunching}
+                onClick={() => doLaunch(p)}
+              >
                 {t.launch}
               </Button>
             )}

@@ -115,6 +115,115 @@ pub fn prepare_userdata(userdata: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Size the real browser window to the identity's claimed outer window.
+///
+/// The spoof rewrites `window.outer*`/`screenX`/`screenY` at the JS level,
+/// but a default-sized OS window behind a claimed 1920×1032 is visible to the
+/// user and invites doubt. Firefox stores its window geometry in the
+/// profile's xulstore.json, so the claimed geometry is written there before
+/// every launch — a regenerated identity's new size wins over the window
+/// size the profile remembered.
+pub fn write_window_xulstore(
+    userdata: &Path,
+    width: u32,
+    height: u32,
+    screen_x: i32,
+    screen_y: i32,
+) -> Result<(), String> {
+    let store = serde_json::json!({
+        "chrome://browser/content/browser.xhtml": {
+            "screenX": screen_x.to_string(),
+            "screenY": screen_y.to_string(),
+            "width": width.to_string(),
+            "height": height.to_string(),
+            "sizemode": "normal",
+        }
+    });
+    let path = userdata.join("xulstore.json");
+    std::fs::write(&path, serde_json::to_string(&store).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// (width, height, screenX, screenY) from a stored identity, if present.
+pub fn identity_window(config: &Value) -> Option<(u32, u32, i32, i32)> {
+    let obj = config.as_object()?;
+    let num = |k: &str| obj.get(k).and_then(Value::as_f64);
+    let w = num("window.outerWidth")?;
+    let h = num("window.outerHeight")?;
+    let x = num("window.screenX")?;
+    let y = num("window.screenY")?;
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    Some((w as u32, h as u32, x as i32, y as i32))
+}
+
+/// Whether the pid still has a live process.
+pub fn pid_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let output = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .creation_flags(0x0800_0000)
+            .output();
+        match output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .any(|l| {
+                    l.split(',')
+                        .next()
+                        .map(|f| f.contains(&pid.to_string()))
+                        .unwrap_or(false)
+                }),
+            Err(_) => true, // cannot tell; keep the stricter error path
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(true)
+    }
+}
+
+/// Kill a process tree; a pid that is already gone is success (a crashed
+/// browser must not make the GUI's Close button report an error).
+pub fn kill_tree(pid: u32) -> Result<(), String> {
+    let result = kill_tree_inner(pid);
+    if result.is_err() && !pid_alive(pid) {
+        return Ok(());
+    }
+    result
+}
+
+fn kill_tree_inner(pid: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(0x0800_0000)
+            .status()
+            .map_err(|e| format!("taskkill failed: {e}"))?;
+        if !status.success() {
+            return Err(format!("taskkill exited with {status}"));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let status = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .map_err(|e| format!("kill failed: {e}"))?;
+        if !status.success() {
+            return Err(format!("kill exited with {status}"));
+        }
+        Ok(())
+    }
+}
+
 /// Flatten profile.config + prefs (+ proxy prefs) into the CAMOU_* env pairs.
 pub fn camou_env(profile: &Profile, local_port: Option<u16>) -> Result<Vec<(String, String)>, String> {
     let limit = chunk_limit();
@@ -142,32 +251,74 @@ pub fn camou_env(profile: &Profile, local_port: Option<u16>) -> Result<Vec<(Stri
     Ok(env)
 }
 
-/// Kill a process tree. Windows needs taskkill (the browser spawns children);
-/// other targets signal the process directly.
-pub fn kill_tree(pid: u32) -> Result<(), String> {
+/// Parse PowerShell CIM JSON output into (pid, command line) pairs.
+pub fn parse_process_list(text: &str) -> Vec<(u32, String)> {
+    let value: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let items: Vec<Value> = match value {
+        Value::Array(items) => items,
+        v @ Value::Object(_) => vec![v],
+        _ => return Vec::new(),
+    };
+    items
+        .into_iter()
+        .filter_map(|v| {
+            let pid = v.get("ProcessId").and_then(Value::as_u64)? as u32;
+            let cmdline = v
+                .get("CommandLine")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            Some((pid, cmdline))
+        })
+        .collect()
+}
+
+/// Kernel processes whose `-profile` points into our profiles directory, as
+/// (pid, profile id). After a GUI restart these browsers are still running
+/// with no state to close them by, so they are re-attached at startup.
+pub fn find_running_profiles(profiles_root: &Path) -> Result<Vec<(u32, String)>, String> {
     #[cfg(windows)]
-    {
-        let status = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .creation_flags(0x0800_0000)
-            .status()
-            .map_err(|e| format!("taskkill failed: {e}"))?;
-        if !status.success() {
-            return Err(format!("taskkill exited with {status}"));
-        }
-        Ok(())
-    }
+    let image = "camoufox.exe";
     #[cfg(not(windows))]
-    {
-        let status = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status()
-            .map_err(|e| format!("kill failed: {e}"))?;
-        if !status.success() {
-            return Err(format!("kill exited with {status}"));
+    let image = "camoufox-bin";
+
+    let script = format!(
+        "Get-CimInstance Win32_Process -Filter \"Name='{image}'\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+    );
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(creation_flags_no_window())
+        .output()
+        .map_err(|e| format!("process scan failed: {e}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(find_running_profiles_sync(profiles_root, &text))
+}
+
+/// Pure matcher over CIM output so the path logic stays unit-testable.
+pub fn find_running_profiles_sync(profiles_root: &Path, cim_text: &str) -> Vec<(u32, String)> {
+    let root_norm = profiles_root.to_string_lossy().replace('/', "\\");
+    let root_norm = root_norm.trim_end_matches('\\');
+    let mut found = Vec::new();
+    for (pid, cmdline) in parse_process_list(cim_text) {
+        if !cmdline.contains("-profile") {
+            continue;
         }
-        Ok(())
+        // The userdata dir is <profiles_root>\<id>\userdata; take the segment
+        // after the profiles root in the process's own path spelling.
+        let cmdline_norm = cmdline.replace('/', "\\");
+        let marker = format!("{root_norm}\\");
+        if let Some(pos) = cmdline_norm.find(&marker) {
+            let rest = &cmdline_norm[pos + marker.len()..];
+            let id = rest.split('\\').next().unwrap_or("");
+            if !id.is_empty() {
+                found.push((pid, id.to_string()));
+            }
+        }
     }
+    found
 }
 
 fn creation_flags_no_window() -> u32 {
@@ -255,6 +406,7 @@ pub fn stop(pid: u32) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::types::{ProxyConfig, ScreenSpec, Summary};
+    use std::fs;
 
     #[test]
     fn chunk_var_splits_and_rejoins_exactly() {
@@ -337,5 +489,62 @@ mod tests {
         let req = p.to_prepare_request();
         assert_eq!(req["screen"]["width"], 1920);
         assert_eq!(req["proxy"]["kind"], "none");
+    }
+
+    #[test]
+    fn xulstore_carries_claimed_geometry() {
+        let dir = std::env::temp_dir().join(format!("camfox-xul-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_window_xulstore(&dir, 1920, 1032, -8, 0).unwrap();
+        let data: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("xulstore.json")).unwrap()).unwrap();
+        let win = &data["chrome://browser/content/browser.xhtml"];
+        assert_eq!(win["width"], "1920");
+        assert_eq!(win["height"], "1032");
+        assert_eq!(win["screenX"], "-8");
+        assert_eq!(win["sizemode"], "normal");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn identity_window_reads_outer_and_screen_pos() {
+        let config = json!({
+            "window.outerWidth": 1920.0,
+            "window.outerHeight": 1032.0,
+            "window.screenX": -8.0,
+            "window.screenY": 0.0,
+        });
+        assert_eq!(identity_window(&config), Some((1920, 1032, -8, 0)));
+        assert_eq!(identity_window(&json!({})), None);
+    }
+
+    #[test]
+    fn parses_cim_list_and_single_object() {
+        let list = r#"[{"ProcessId": 42, "CommandLine": "camoufox.exe -profile C:\\d\\profiles\\p1\\userdata"},
+                       {"ProcessId": 43, "CommandLine": null}]"#;
+        let out = parse_process_list(list);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, 42);
+        assert!(out[1].1.is_empty());
+        let single = r#"{"ProcessId": 7, "CommandLine": "x"}"#;
+        assert_eq!(parse_process_list(single)[0].0, 7);
+        assert!(parse_process_list("not json").is_empty());
+    }
+
+    #[test]
+    fn running_profile_scan_matches_profiles_root() {
+        let root = std::env::temp_dir().join(format!("camfox-scan-{}", std::process::id()));
+        let profiles = root.join("profiles");
+        std::fs::create_dir_all(&profiles).unwrap();
+        let cim = format!(
+            r#"[{{"ProcessId": 100, "CommandLine": "k.exe -no-remote -profile {}\\p1\\userdata"}},
+               {{"ProcessId": 101, "CommandLine": "k.exe -profile C:\\Temp\\playwright_oth\\userdata"}},
+               {{"ProcessId": 102, "CommandLine": "k.exe -no-remote"}}]"#,
+            profiles.to_string_lossy().replace('\\', "\\\\")
+        );
+        let found = find_running_profiles_sync(&profiles, &cim);
+        assert_eq!(found, vec![(100, "p1".to_string())]);
+        let _ = fs::remove_dir_all(&root);
     }
 }

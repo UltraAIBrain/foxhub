@@ -27,7 +27,12 @@ only copy of that logic.
   the proxy exit IP), block WebRTC entirely, or pin a specific IPv4 (IPv6
   candidates disabled). GeoIP works with or without a proxy.
 - **Multi-open isolation** — one process + one profile directory + one
-  identity per environment; launch as many as the machine allows.
+  identity per environment; launch as many as the machine allows. The OS
+  window is sized to the identity's claimed outer window (written into the
+  profile's `xulstore.json` before each launch), so the real window matches
+  what the machine claims. After a GUI restart, still-running browsers are
+  re-attached automatically so Close works on them again (a relaunched
+  authenticated-proxy profile is needed to restore its proxy forwarder).
 - **Proxies** — HTTP / SOCKS5 per environment, with or without credentials.
   Authenticated proxies are served through a local SOCKS5 forwarder (Rust,
   in-process) that injects the credentials upstream; the browser only ever

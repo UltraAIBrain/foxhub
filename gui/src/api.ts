@@ -36,6 +36,15 @@ export const api = {
     invoke<number>("import_cookies", { id, format, content }),
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
+  diagnose: () =>
+    invoke<{
+      sidecarMode: string;
+      sidecarDir: string | null;
+      python: string | null;
+      kernelVersion: string | null;
+      kernelPath: string | null;
+      error: string | null;
+    }>("diagnose"),
   dataDir: () => invoke<string>("data_dir"),
   writeTextFile: (path: string, content: string) => invoke<void>("write_text_file", { path, content }),
   readTextFile: (path: string) => invoke<string>("read_text_file", { path }),

@@ -80,7 +80,13 @@ export interface RunningInfo {
 
 export interface ProfileStatus {
   id: string;
-  status: "launching" | "running" | "exited" | "failed" | "automation-connecting" | "automation-ready";
+  status:
+    | "launching"
+    | "running"
+    | "exited"
+    | "failed"
+    | "automation-connecting"
+    | "automation-ready";
   pid?: number;
   endpoint?: string;
   error?: string;
