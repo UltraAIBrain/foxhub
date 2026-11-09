@@ -29,15 +29,9 @@ export function App() {
       .getSettings()
       .then((s) => setLanguage(s.language || "zh-CN"))
       .catch(() => undefined);
-    api
-      .runningProfiles()
-      .then((infos) =>
-        setRunning(Object.fromEntries(infos.map((i) => [i.id, { status: "running" as const, pid: i.pid }]))),
-      )
-      .catch(() => undefined);
-  }, []);
-
-  useEffect(() => {
+    // Subscribe before the first fetch: the startup recovery scan reports
+    // browsers a previous session left running, and an emit landing between
+    // the fetch and the subscription would be lost.
     const unlisten = listen<ProfileStatus>("profile-status", (event) => {
       const s = event.payload;
       setRunning((prev) => {
@@ -50,6 +44,17 @@ export function App() {
         return next;
       });
     });
+    api
+      .runningProfiles()
+      .then((infos) =>
+        setRunning((prev) =>
+          Object.fromEntries([
+            ...Object.entries(prev),
+            ...infos.map((i) => [i.id, { status: "running" as const, pid: i.pid }]),
+          ]),
+        ),
+      )
+      .catch(() => undefined);
     return () => {
       unlisten.then((fn) => fn());
     };

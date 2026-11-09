@@ -15,9 +15,11 @@ export function CookieModal(props: { profile: Profile; open: boolean; onClose: (
     setBusy(true);
     try {
       const ext = format === "json" ? "json" : "txt";
+      // A profile name may hold characters Windows forbids in a filename.
+      const stem = props.profile.name.replace(/[\\/:*?"<>|]/g, "_");
       const path = await save({
         title: t.exportDo,
-        defaultPath: `${props.profile.name}-cookies.${ext}`,
+        defaultPath: `${stem}-cookies.${ext}`,
         filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
       });
       if (!path) return;
@@ -38,8 +40,12 @@ export function CookieModal(props: { profile: Profile; open: boolean; onClose: (
       const path = await open({
         title: t.importDo,
         multiple: false,
+        // The parser is chosen by the format toggle, so the picker offers only
+        // that format's extension instead of letting a mismatch through.
         filters: [
-          { name: "Cookies", extensions: ["json", "txt"] },
+          format === "json"
+            ? { name: "JSON", extensions: ["json"] }
+            : { name: "Netscape", extensions: ["txt"] },
         ],
       });
       if (!path) return;

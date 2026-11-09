@@ -149,20 +149,26 @@ export function ProfileEditModal(props: {
   profile: Profile | null; // null = create
   groups: string[];
   onClose: () => void;
-  onSaved: () => void;
+  /** The stored profile changed; refresh the list. Does not close the modal. */
+  onChanged: () => void;
 }) {
   const t = useT();
   const [form] = Form.useForm<FormValues>();
   const [saving, setSaving] = useState(false);
+  /** The profile as last written to disk. A profile created by this modal is
+   * kept here so a retry updates it instead of creating a second one. */
+  const [stored, setStored] = useState<Profile | null>(null);
   const [checking, setChecking] = useState(false);
   const [proxyResult, setProxyResult] = useState<ProxyCheckResult | null>(null);
   const [summary, setSummary] = useState<Profile["summary"]>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const proxyKind = Form.useWatch("proxyKind", form);
+  const geoipOn = Form.useWatch("geoip", form);
   const webrtcMode = Form.useWatch("webrtcMode", form);
 
   useEffect(() => {
     if (!props.open) return;
+    setStored(props.profile);
     if (props.profile) {
       form.setFieldsValue(toFormValues(props.profile));
       setSummary(props.profile.summary ?? null);
@@ -225,32 +231,41 @@ export function ProfileEditModal(props: {
 
   const handleSave = async () => {
     const values = await form.validateFields();
+    // buildProfile would silently drop a half-filled pair, so the window would
+    // fall back to "auto" without telling anyone.
+    if (!!values.windowWidth !== !!values.windowHeight) {
+      message.warning(t.windowPairRequired);
+      return;
+    }
     setSaving(true);
     try {
-      const isNew = !props.profile?.id;
-      const saved = await api.saveProfile(buildProfile(props.profile ?? emptyProfile(), values));
+      const isNew = !stored?.id;
+      const saved = await api.saveProfile(buildProfile(stored ?? emptyProfile(), values));
+      setStored(saved);
       // The stored identity is frozen; anything that describes the machine
       // must be drawn again, or the form would claim values the browser does
       // not present.
       const needsRegen =
         isNew ||
-        (props.profile
-          ? identitySignature(saved) !== identitySignature(props.profile)
-          : false) ||
-        (saved.fingerprintMode === "fixed" && props.profile?.fingerprintMode === "random");
+        (stored ? identitySignature(saved) !== identitySignature(stored) : false) ||
+        (saved.fingerprintMode === "fixed" && stored?.fingerprintMode === "random");
+      let prepared = true;
       if (needsRegen) {
         message.loading({ content: t.generating, key: "prepare", duration: 0 });
         try {
-          const prepared = await api.prepareProfile(saved.id);
-          setSummary(prepared.profile.summary ?? null);
-          setWarnings(prepared.warnings);
+          const result = await api.prepareProfile(saved.id);
+          setSummary(result.profile.summary ?? null);
+          setWarnings(result.warnings);
           message.success({ content: t.save, key: "prepare" });
         } catch (e) {
+          // The profile is on disk but has no identity. Closing the modal here
+          // would hide the only explanation of why it shows "no fingerprint".
+          prepared = false;
           message.error({ content: String(e), key: "prepare" });
         }
       }
-      props.onSaved();
-      if (!isNew) props.onClose();
+      props.onChanged();
+      if (prepared) props.onClose();
     } catch (e) {
       message.error(String(e));
     } finally {
@@ -259,18 +274,19 @@ export function ProfileEditModal(props: {
   };
 
   const handleRegenerate = async () => {
-    if (!props.profile?.id) {
-      message.warning(t.save);
+    const id = stored?.id;
+    if (!id) {
+      message.warning(t.saveFirst);
       return;
     }
     setSaving(true);
     message.loading({ content: t.generating, key: "prepare", duration: 0 });
     try {
-      const prepared = await api.prepareProfile(props.profile.id);
-      setSummary(prepared.profile.summary ?? null);
-      setWarnings(prepared.warnings);
-      message.success({ content: t.regenerate, key: "prepare" });
-      props.onSaved();
+      const result = await api.prepareProfile(id);
+      setSummary(result.profile.summary ?? null);
+      setWarnings(result.warnings);
+      message.success({ content: t.regenerated, key: "prepare" });
+      props.onChanged();
     } catch (e) {
       message.error({ content: String(e), key: "prepare" });
     } finally {
@@ -283,9 +299,12 @@ export function ProfileEditModal(props: {
   return (
     <Modal
       open={props.open}
-      title={props.profile ? `${t.edit}: ${props.profile.name}` : t.newProfile}
+      title={stored ? `${t.edit}: ${stored.name}` : t.newProfile}
       width={720}
       onCancel={props.onClose}
+      // The fingerprint tab is taller than an 820px window; without a bounded,
+      // scrollable body the footer ends up below the screen and cannot be reached.
+      styles={{ body: { maxHeight: "62vh", overflowY: "auto", paddingRight: 8 } }}
       footer={[
         <Button key="cancel" onClick={props.onClose}>
           {t.cancel}
@@ -516,6 +535,14 @@ export function ProfileEditModal(props: {
                   </Form.Item>
                   {hasProxy && (
                     <>
+                      {!geoipOn && (
+                        <Alert
+                          style={{ marginBottom: 12 }}
+                          type="info"
+                          showIcon
+                          message={t.proxyGeoipHint}
+                        />
+                      )}
                       <Space size="large" wrap>
                         <Form.Item name="proxyHost" label={t.proxyHost} rules={[{ required: true }]}>
                           <Input style={{ width: 220 }} placeholder="proxy.example.com" />

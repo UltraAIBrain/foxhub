@@ -199,20 +199,28 @@ pub async fn prepare_profile_inner(
                 .collect()
         })
         .unwrap_or_default();
-    profile.summary = response
-        .get("summary")
-        .cloned()
-        .and_then(|s| serde_json::from_value(s).ok());
-    let warnings = response
+    let mut warnings = response
         .get("warnings")
         .and_then(Value::as_array)
         .map(|a| {
             a.iter()
                 .filter_map(Value::as_str)
                 .map(str::to_string)
-                .collect()
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    match response.get("summary").cloned() {
+        None => profile.summary = None,
+        Some(value) => match serde_json::from_value(value) {
+            Ok(summary) => profile.summary = Some(summary),
+            // A shape this side cannot decode must not vanish into "no
+            // fingerprint" while the identity itself is stored: say so.
+            Err(e) => {
+                profile.summary = None;
+                warnings.push(format!("identity summary could not be decoded: {e}"));
+            }
+        },
+    }
     state.store.save(&profile)?;
     Ok(PrepareResult { profile, warnings })
 }
@@ -303,7 +311,6 @@ async fn launch_profile_inner(
         Running::Browser {
             pid,
             forwarder: forwarder_handle,
-            since: std::time::Instant::now(),
         },
     );
     AppState::emit_status(app, id, "running", json!({ "pid": pid }));
@@ -339,42 +346,87 @@ pub fn close_profile(id: String, state: State<'_, AppState>) -> Result<(), Strin
     }
 }
 
-/// Watch launched browsers and report an exit once the process carrying the
-/// profile is gone. The cheap `pid_alive` check runs every two seconds; a
-/// command-line scan only happens after that pid died, to see whether the
-/// browser re-launched under a new one.
+/// Consecutive authoritative scans without a process before an exit is
+/// reported. One is normal while the launcher hands off to the browser, or
+/// while the process tree is still tearing down.
+const MISSES_BEFORE_EXIT: u8 = 2;
+
+/// What the supervisor does with one profile on one tick.
+#[derive(Debug, PartialEq, Eq)]
+enum Watch {
+    /// A process carrying this profile exists; adopt its pid.
+    Alive(u32),
+    /// Nothing carries the profile yet; `count` consecutive misses so far.
+    Missing(u8),
+    /// The profile is gone.
+    Closed,
+}
+
+/// Decide from the argv scan alone. The tracked pid is deliberately not an
+/// input: Windows reuses pids, so a closed browser's pid can belong to an
+/// unrelated process two seconds later, and a `pid_alive` fast path then
+/// reports the profile as running forever.
+fn watch_step(found: Option<u32>, misses: u8) -> Watch {
+    match found {
+        Some(pid) => Watch::Alive(pid),
+        None => {
+            let count = misses.saturating_add(1);
+            if count >= MISSES_BEFORE_EXIT {
+                Watch::Closed
+            } else {
+                Watch::Missing(count)
+            }
+        }
+    }
+}
+
+/// Watch launched browsers and report an exit once no process carries the
+/// profile any more.
 pub fn start_supervisor(app: AppHandle) {
     std::thread::spawn(move || {
-        const STARTUP_GRACE: Duration = Duration::from_secs(15);
+        let mut misses: HashMap<String, u8> = HashMap::new();
         loop {
             std::thread::sleep(Duration::from_secs(2));
             let state = app.state::<AppState>();
             let ids: Vec<String> = state.running.lock().unwrap().keys().cloned().collect();
+            if ids.is_empty() {
+                misses.clear();
+                continue;
+            }
+            // Every profile is decided by one scan of the process table.
+            let scan = match launch::find_running_profiles(&state.store.profiles_dir()) {
+                Ok(found) => found,
+                // Unknown is not "closed": a failed scan must not tear down a
+                // browser that is still running.
+                Err(_) => continue,
+            };
             for id in ids {
                 let entry = {
                     let running = state.running.lock().unwrap();
                     match running.get(&id) {
-                        Some(Running::Browser { pid, since, .. }) => {
-                            (*pid, since.elapsed() >= STARTUP_GRACE)
-                        }
+                        Some(Running::Browser { pid, .. }) => *pid,
                         _ => continue,
                     }
                 };
-                let (pid, old_enough) = entry;
-                if !old_enough || launch::pid_alive(pid) {
-                    continue;
-                }
-                // The tracked pid is gone: either the browser closed, or the
-                // launcher handed off to another pid.
-                let remaining = launch::profile_processes(&state.store.profiles_dir(), &id);
-                match remaining.first() {
-                    Some(new_pid) => {
-                        let mut running = state.running.lock().unwrap();
-                        if let Some(Running::Browser { pid, .. }) = running.get_mut(&id) {
-                            *pid = *new_pid;
+                let found = scan
+                    .iter()
+                    .find(|(_, found_id)| *found_id == id)
+                    .map(|(pid, _)| *pid);
+                match watch_step(found, misses.get(&id).copied().unwrap_or(0)) {
+                    Watch::Alive(pid) => {
+                        misses.remove(&id);
+                        if pid != entry {
+                            let mut running = state.running.lock().unwrap();
+                            if let Some(Running::Browser { pid: tracked, .. }) = running.get_mut(&id) {
+                                *tracked = pid;
+                            }
                         }
                     }
-                    None => {
+                    Watch::Missing(count) => {
+                        misses.insert(id, count);
+                    }
+                    Watch::Closed => {
+                        misses.remove(&id);
                         let removed = state.running.lock().unwrap().remove(&id);
                         if let Some(Running::Browser { forwarder, .. }) = removed {
                             if let Some(f) = forwarder {
@@ -661,7 +713,7 @@ pub async fn import_profiles(
         .and_then(Value::as_array)
         .cloned()
         .ok_or_else(|| "import file has no profiles array".to_string())?;
-    let existing_names: Vec<String> = state
+    let mut existing_names: Vec<String> = state
         .store
         .list()?
         .into_iter()
@@ -682,7 +734,9 @@ pub async fn import_profiles(
             name = format!("{} ({n})", profile.name);
             n += 1;
         }
-        profile.name = name;
+        profile.name = name.clone();
+        // Later entries in the same file must not reuse this name.
+        existing_names.push(name);
         if regenerate {
             profile.config = None;
             profile.summary = None;
@@ -763,8 +817,6 @@ pub fn restore_running_browsers(app: &AppHandle) -> usize {
             Running::Browser {
                 pid,
                 forwarder: None,
-                // Old enough by definition: it is already running.
-                since: std::time::Instant::now() - Duration::from_secs(60),
             },
         );
         AppState::emit_status(app, &id, "running", json!({ "pid": pid, "recovered": true }));
@@ -866,4 +918,86 @@ pub fn write_text_file(path: String, content: String) -> Result<(), String> {
 pub fn read_text_file(path: String) -> Result<String, String> {
     let path = Path::new(&path);
     std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
+// ------------------------------------------------------------- isolation
+
+/// The machine-level facets that decide whether two profiles look like one
+/// device to a page. Canvas and WebGL pixels follow the OS, GPU and fonts, so
+/// profiles sharing those are indistinguishable there; audio follows the CPU
+/// architecture and is identical in every profile on one host.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsolationFacet {
+    pub id: String,
+    pub name: String,
+    pub os: Option<String>,
+    pub platform: Option<String>,
+    pub screen: Option<Vec<u32>>,
+    pub timezone: Option<String>,
+    pub locale: Option<String>,
+    pub cores: Option<u32>,
+    pub gpu: Option<String>,
+    pub fonts: Option<u32>,
+    pub proxy: String,
+    pub proxy_host: Option<String>,
+    pub webrtc: String,
+    pub identity_id: Option<String>,
+}
+
+#[tauri::command]
+pub fn isolation_facets(state: State<'_, AppState>) -> Result<Vec<IsolationFacet>, String> {
+    let mut out: Vec<IsolationFacet> = state
+        .store
+        .list()?
+        .into_iter()
+        .map(|p| {
+            let s = p.summary.as_ref();
+            IsolationFacet {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                os: p.os.clone().or_else(|| s.and_then(|x| x.platform.clone())),
+                platform: s.and_then(|x| x.platform.clone()),
+                screen: s.and_then(|x| x.screen.clone()),
+                timezone: s.and_then(|x| x.timezone.clone()),
+                locale: s.and_then(|x| x.locale.clone()),
+                cores: s.and_then(|x| x.hardware_concurrency),
+                gpu: s.and_then(|x| x.gpu_renderer.clone()),
+                fonts: s.and_then(|x| x.fonts_count),
+                proxy: p.proxy.kind.clone(),
+                proxy_host: if p.proxy.kind == "none" {
+                    None
+                } else {
+                    Some(format!("{}:{}", p.proxy.host, p.proxy.port))
+                },
+                webrtc: p.webrtc_mode.clone(),
+                identity_id: s.and_then(|x| x.identity_id.clone()),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_missing_scan_is_not_an_exit() {
+        // The launcher hands off to the browser, and a closing tree tears down
+        // in stages; both look like a single miss.
+        assert_eq!(watch_step(None, 0), Watch::Missing(1));
+    }
+
+    #[test]
+    fn two_consecutive_missing_scans_report_the_profile_closed() {
+        assert_eq!(watch_step(None, 1), Watch::Closed);
+        assert_eq!(watch_step(None, u8::MAX), Watch::Closed);
+    }
+
+    #[test]
+    fn a_process_carrying_the_profile_is_adopted_and_clears_the_misses() {
+        assert_eq!(watch_step(Some(4242), 1), Watch::Alive(4242));
+    }
 }

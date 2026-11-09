@@ -10,6 +10,7 @@ mod store;
 mod types;
 
 use commands::AppState;
+use launch::Running;
 use settings::Settings;
 use tauri::{Manager, RunEvent};
 
@@ -41,6 +42,7 @@ pub fn run() {
             commands::launch_profile,
             commands::close_profile,
             commands::running_profiles,
+            commands::isolation_facets,
             commands::open_automation,
             commands::close_automation,
             commands::check_proxy,
@@ -78,7 +80,23 @@ pub fn run() {
 
 fn close_all(app_handle: &tauri::AppHandle) {
     if let Some(state) = app_handle.try_state::<AppState>() {
-        let ids: Vec<String> = state.running.lock().unwrap().keys().cloned().collect();
+        let (ids, automation): (Vec<String>, Vec<u32>) = {
+            let running = state.running.lock().unwrap();
+            let mut ids = Vec::new();
+            let mut automation = Vec::new();
+            for (id, entry) in running.iter() {
+                match entry {
+                    Running::Browser { .. } => ids.push(id.clone()),
+                    Running::Automation { .. } => automation.push(entry.pid()),
+                }
+            }
+            (ids, automation)
+        };
+        // An automation sidecar is a Playwright server with no session state to
+        // flush, and it carries no `-profile`, so the scan below would miss it.
+        for pid in automation {
+            let _ = launch::kill_tree(pid);
+        }
         if ids.is_empty() {
             return;
         }

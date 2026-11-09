@@ -96,7 +96,7 @@ export function SettingsPage(props: { language: string; onLanguage: (lang: strin
           style={{ marginTop: 16 }}
           type={diag.error ? "error" : "success"}
           showIcon
-          message={diag.error ? t.diagFail : t.settingsSaved}
+          message={diag.error ? t.diagFail : t.diagOk}
           description={<pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{diagLines(diag)}</pre>}
         />
       )}

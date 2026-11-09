@@ -182,8 +182,11 @@ pub fn import_json(userdata: &Path, cookies: &[Value]) -> Result<usize, String> 
         push("creationTime", now_micros.into());
 
         let placeholders: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
+        // OR REPLACE: moz_unique_idx is (originAttributes, host, path, name), so
+        // re-importing over a profile that already holds the cookie updates it
+        // instead of failing the whole file on a constraint violation.
         let sql = format!(
-            "INSERT INTO moz_cookies ({}) VALUES ({})",
+            "INSERT OR REPLACE INTO moz_cookies ({}) VALUES ({})",
             cols.join(", "),
             placeholders.join(", ")
         );
@@ -233,5 +236,50 @@ mod tests {
         // end-to-end run. Here the parser must reject malformed lines loudly.
         assert!(import_netscape(std::path::Path::new("nope"), "bad\tline").is_err());
         assert!(import_netscape(std::path::Path::new("nope"), "d\tTRUE\t/\tTRUE\t0\tn\tv\textra").is_err());
+    }
+
+    /// The column set the import adapts to, plus Firefox's unique index.
+    fn fixture_db(dir: &Path) -> std::path::PathBuf {
+        let db = dir.join("cookies.sqlite");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE moz_cookies (
+                id INTEGER PRIMARY KEY,
+                originAttributes TEXT NOT NULL DEFAULT '',
+                name TEXT, value TEXT, host TEXT, path TEXT,
+                expiry INTEGER, lastAccessed INTEGER, creationTime INTEGER,
+                isSecure INTEGER, isHttpOnly INTEGER, sameSite INTEGER,
+                rawSameSite INTEGER, schemeMap INTEGER, inBrowserElement INTEGER
+             );
+             CREATE UNIQUE INDEX moz_unique_idx ON moz_cookies
+                (originAttributes, host, path, name);",
+        )
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn reimporting_a_cookie_updates_it_instead_of_failing() {
+        let dir = std::env::temp_dir().join(format!("camfox-cookies-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        fixture_db(&dir);
+
+        let first = json!([{"name": "sid", "value": "one", "domain": ".example.com", "path": "/"}]);
+        let second = json!([{"name": "sid", "value": "two", "domain": ".example.com", "path": "/"}]);
+        assert_eq!(import_json(&dir, first.as_array().unwrap()).unwrap(), 1);
+        // The same cookie again: a plain INSERT tripped moz_unique_idx here.
+        assert_eq!(import_json(&dir, second.as_array().unwrap()).unwrap(), 1);
+
+        let conn = Connection::open(dir.join("cookies.sqlite")).unwrap();
+        let (value, count): (String, i64) = conn
+            .query_row(
+                "SELECT value, (SELECT COUNT(*) FROM moz_cookies) FROM moz_cookies WHERE name = 'sid'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((value.as_str(), count), ("two", 1));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

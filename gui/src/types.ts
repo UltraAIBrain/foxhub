@@ -39,6 +39,23 @@ export interface Summary {
 
 export type WebrtcMode = "auto" | "block" | "custom";
 
+export interface IsolationFacet {
+  id: string;
+  name: string;
+  os: string | null;
+  platform: string | null;
+  screen: number[] | null;
+  timezone: string | null;
+  locale: string | null;
+  cores: number | null;
+  gpu: string | null;
+  fonts: number | null;
+  proxy: string;
+  proxyHost: string | null;
+  webrtc: string;
+  identityId: string | null;
+}
+
 export interface Profile {
   id: string;
   name: string;

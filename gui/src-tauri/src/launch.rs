@@ -380,9 +380,6 @@ pub enum Running {
     Browser {
         pid: u32,
         forwarder: Option<ForwarderHandle>,
-        /// When this launch was registered; the supervisor ignores very young
-        /// entries so a slow start is not mistaken for an exit.
-        since: std::time::Instant,
     },
     Automation {
         child: Child,

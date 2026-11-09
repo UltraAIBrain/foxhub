@@ -78,7 +78,7 @@ export function KernelPage() {
           column={2}
           title={t.kernelActive}
           items={[
-            { key: "v", label: t.kernelActive, children: info?.version ?? "—" },
+            { key: "v", label: t.kernelVersion, children: info?.version ?? "—" },
             {
               key: "p",
               label: t.kernelExecutable,
@@ -111,7 +111,7 @@ export function KernelPage() {
           pagination={false}
           dataSource={info?.installed ?? []}
           columns={[
-            { title: t.kernelActive, dataIndex: "label", key: "label" },
+            { title: t.kernelVersion, dataIndex: "label", key: "label" },
             {
               title: t.kernelInstallDir,
               dataIndex: "path",
@@ -124,7 +124,7 @@ export function KernelPage() {
               ),
             },
             {
-              title: "Size",
+              title: t.kernelSize,
               dataIndex: "assetSize",
               key: "size",
               width: 100,

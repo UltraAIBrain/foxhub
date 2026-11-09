@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  IsolationFacet,
   KernelInfo,
   PrepareResult,
   Profile,
@@ -19,6 +20,7 @@ export const api = {
   launchProfile: (id: string) => invoke<void>("launch_profile", { id }),
   closeProfile: (id: string) => invoke<void>("close_profile", { id }),
   runningProfiles: () => invoke<RunningInfo[]>("running_profiles"),
+  isolationFacets: () => invoke<IsolationFacet[]>("isolation_facets"),
   openAutomation: (id: string) => invoke<void>("open_automation", { id }),
   closeAutomation: (id: string) => invoke<void>("close_automation", { id }),
   checkProxy: (proxy: ProxyConfig) => invoke<ProxyCheckResult>("check_proxy", { proxy }),

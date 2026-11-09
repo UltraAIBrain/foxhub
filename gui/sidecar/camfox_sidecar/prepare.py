@@ -48,14 +48,20 @@ def prepare(req: Dict[str, Any]) -> Dict[str, Any]:
         kwargs["window"] = (int(req["window"]["width"]), int(req["window"]["height"]))
     if req.get("locale"):
         kwargs["locale"] = req["locale"]
-    if req.get("timezone") and not req.get("geoip"):
-        # GeoIP owns the timezone; a caller value alongside it contradicts it.
-        kwargs.setdefault("config", {})["timezone"] = req["timezone"]
-    if req.get("geoip"):
-        kwargs["geoip"] = True
     proxy = proxy_kwarg(req.get("proxy") or {})
     if proxy:
         kwargs["proxy"] = proxy
+    geoip = _geoip_for(req, bool(proxy))
+    explicit_timezone = req.get("timezone")
+    notes: List[str] = []
+    if geoip and not req.get("geoip"):
+        # Say so rather than silently replacing the timezone and locale.
+        notes.append("GeoIP enabled: timezone and locale follow the proxy exit IP")
+    if geoip:
+        kwargs["geoip"] = True
+    elif explicit_timezone:
+        # GeoIP owns the timezone; a caller value alongside it contradicts it.
+        kwargs.setdefault("config", {})["timezone"] = explicit_timezone
     _apply_webrtc(req.get("webrtc") or {}, kwargs)
 
     with warnings.catch_warnings(record=True) as caught:
@@ -78,8 +84,20 @@ def prepare(req: Dict[str, Any]) -> Dict[str, Any]:
         "proxy": result.get("proxy"),
         "extra_env": extra_env,
         "summary": {**summary(config), "canvasCovered": canvas_covered(prefs)},
-        "warnings": _collect_warnings(list(caught)),
+        "warnings": _collect_warnings(list(caught)) + notes,
     }
+
+
+def _geoip_for(req: Dict[str, Any], has_proxy: bool) -> bool:
+    """Whether this draw follows the exit IP geography.
+
+    A proxy without geoip leaves this host's timezone and locale in the
+    identity, which contradicts the exit address and links the profile back to
+    the machine. An explicit timezone is a deliberate choice, so it wins.
+    """
+    if req.get("geoip"):
+        return True
+    return has_proxy and not req.get("timezone")
 
 
 def _apply_webrtc(spec: Dict[str, Any], kwargs: Dict[str, Any]) -> None:

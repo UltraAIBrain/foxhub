@@ -1,5 +1,7 @@
 """Tests for identity summary and WebRTC option mapping."""
 
+import json
+
 import pytest
 
 from camfox_sidecar.mapping import canvas_covered, identity_id, summary
@@ -60,6 +62,18 @@ class TestSummary:
         s = summary(CONFIG)
         assert "identityId" in s and "identity_id" not in s
         assert "gpuVendor" in s and "gpu_vendor" not in s
+
+    def test_missing_pair_is_none_not_null_padded(self):
+        # innerWindow used to be [null, null]: the Rust side decodes these as
+        # Vec<u32>, failed, and dropped the whole summary, so every profile
+        # showed "no fingerprint" although its config had been stored.
+        s = summary(CONFIG)
+        assert s["innerWindow"] is None
+        assert s["window"] == [1920, 1032]
+        for key in ("screen", "availScreen", "window", "innerWindow"):
+            value = s[key]
+            assert value is None or all(v is not None for v in value), (key, value)
+        json.dumps(s)
 
 
 class TestCanvasCovered:

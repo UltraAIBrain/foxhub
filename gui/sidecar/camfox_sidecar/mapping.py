@@ -56,13 +56,23 @@ def canvas_covered(prefs: Mapping[str, Any]) -> bool:
     return "CanvasImageExtractionPrompt" in overrides
 
 
+def _pair(config: Mapping[str, Any], *keys: str) -> Optional[List[Any]]:
+    """A width/height pair, or None when any member is missing.
+
+    A JSON null inside the list would fail the Rust side's `Vec<u32>` decode,
+    which then drops the entire summary and leaves the profile showing "no
+    fingerprint" although the identity was stored.
+    """
+    values = [config.get(k) for k in keys]
+    numeric = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values)
+    return values if numeric else None
+
+
 def summary(config: Dict[str, Any]) -> Dict[str, Any]:
     """The human-readable slice of the identity shown in the GUI.
 
     Keys are camelCase to match the Rust side's serde rename.
     """
-    screen = [config.get("screen.width"), config.get("screen.height")]
-    avail = [config.get("screen.availWidth"), config.get("screen.availHeight")]
     media = [
         config.get("mediaDevices:micros", 0),
         config.get("mediaDevices:webcams", 0),
@@ -73,16 +83,10 @@ def summary(config: Dict[str, Any]) -> Dict[str, Any]:
         "ua": config.get("navigator.userAgent"),
         "platform": config.get("navigator.platform"),
         "oscpu": config.get("navigator.oscpu"),
-        "screen": screen,
-        "availScreen": avail,
-        "window": [
-            config.get("window.outerWidth"),
-            config.get("window.outerHeight"),
-        ],
-        "innerWindow": [
-            config.get("window.innerWidth"),
-            config.get("window.innerHeight"),
-        ],
+        "screen": _pair(config, "screen.width", "screen.height"),
+        "availScreen": _pair(config, "screen.availWidth", "screen.availHeight"),
+        "window": _pair(config, "window.outerWidth", "window.outerHeight"),
+        "innerWindow": _pair(config, "window.innerWidth", "window.innerHeight"),
         "colorDepth": config.get("screen.colorDepth"),
         "timezone": config.get("timezone"),
         "locale": config.get("locale:all") or config.get("navigator.language"),

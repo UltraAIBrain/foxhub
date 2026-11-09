@@ -21,6 +21,7 @@ import {
   LoadingOutlined,
   PlayCircleFilled,
   PlusOutlined,
+  SafetyOutlined,
   StopOutlined,
 } from "@ant-design/icons";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -30,6 +31,7 @@ import type { Profile } from "../types";
 import type { RunningState } from "../App";
 import { ProfileEditModal } from "../components/ProfileEditModal";
 import { CookieModal } from "../components/CookieModal";
+import { IsolationModal } from "../components/IsolationModal";
 
 const PAGE = "profiles";
 
@@ -45,6 +47,9 @@ export function ProfilesPage(props: { running: Record<string, RunningState> }) {
   const [cookieTarget, setCookieTarget] = useState<Profile | null>(null);
   const [cookieOpen, setCookieOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [batchBusy, setBatchBusy] = useState<null | "launch" | "close">(null);
+  const [isoOpen, setIsoOpen] = useState(false);
+  const [page, setPage] = useState(1);
 
   const reload = async () => {
     try {
@@ -71,9 +76,19 @@ export function ProfilesPage(props: { running: Record<string, RunningState> }) {
 
   const running = props.running;
 
+  // Deleting the last row of the last page would otherwise leave an empty
+  // page selected, and the table would look as if it had lost every profile.
+  useEffect(() => {
+    const lastPage = Math.max(1, Math.ceil(filtered.length / 20));
+    if (page > lastPage) setPage(lastPage);
+  }, [filtered.length, page]);
+
   const doLaunch = async (p: Profile) => {
     try {
       await api.launchProfile(p.id);
+      // The backend stamps lastLaunchedAt; without this the column stays stale
+      // until something else reloads the list.
+      await reload();
     } catch (e) {
       message.error(String(e));
     }
@@ -112,7 +127,7 @@ export function ProfilesPage(props: { running: Record<string, RunningState> }) {
       const copy = await api.duplicateProfile(p.id);
       await api.prepareProfile(copy.id);
       await reload();
-      message.success({ content: t.duplicate, key });
+      message.success({ content: t.duplicated, key });
     } catch (e) {
       message.error({ content: String(e), key });
     } finally {
@@ -167,25 +182,41 @@ export function ProfilesPage(props: { running: Record<string, RunningState> }) {
     }
   };
 
-  const batchLaunch = async () => {
+  const runBatch = async (mode: "launch" | "close") => {
     if (selectedIds.length === 0) {
       message.warning(t.selectRows);
       return;
     }
-    for (const id of selectedIds) {
-      const p = profiles.find((x) => x.id === id);
-      if (p && !running[p.id]) await doLaunch(p);
-    }
-  };
+    const targets = selectedIds
+      .map((id) => profiles.find((x) => x.id === id))
+      .filter((p): p is Profile => !!p)
+      .filter((p) => (mode === "launch" ? !running[p.id] : !!running[p.id]));
+    if (targets.length === 0) return;
 
-  const batchClose = async () => {
-    if (selectedIds.length === 0) {
-      message.warning(t.selectRows);
-      return;
-    }
-    for (const id of selectedIds) {
-      const p = profiles.find((x) => x.id === id);
-      if (p && running[p.id]) await doClose(p);
+    const key = `batch-${mode}`;
+    setBatchBusy(mode);
+    message.loading({ content: t.generating, key, duration: 0 });
+    try {
+      // Sequential launching spent one wait per profile before starting the
+      // next, so a batch of ten looked frozen for minutes. Each launch has its
+      // own guard in the backend, so they can start together.
+      const results = await Promise.allSettled(
+        targets.map((p) => (mode === "launch" ? api.launchProfile(p.id) : api.closeProfile(p.id))),
+      );
+      const failed = results.filter((r) => r.status === "rejected").length;
+      await reload();
+      if (failed === 0) {
+        message.success({ content: t.batchDone.replace("{n}", String(targets.length)), key });
+      } else {
+        message.warning({
+          content: t.batchPartial
+            .replace("{n}", String(targets.length - failed))
+            .replace("{m}", String(failed)),
+          key,
+        });
+      }
+    } finally {
+      setBatchBusy(null);
     }
   };
 
@@ -208,7 +239,14 @@ export function ProfilesPage(props: { running: Record<string, RunningState> }) {
       case "automation-ready":
         return (
           <Tooltip title={s.endpoint}>
-            <Tag color="blue" icon={<CopyOutlined />} onClick={() => s.endpoint && navigator.clipboard.writeText(s.endpoint)}>
+            <Tag
+              color="blue"
+              icon={<CopyOutlined />}
+              onClick={() => {
+                if (!s.endpoint) return;
+                navigator.clipboard.writeText(s.endpoint).then(() => message.success(t.copied));
+              }}
+            >
               {t.statusReady}
             </Tag>
           </Tooltip>
@@ -225,22 +263,29 @@ export function ProfilesPage(props: { running: Record<string, RunningState> }) {
       title: t.colName,
       dataIndex: "name",
       key: "name",
+      width: 170,
       render: (_: unknown, p: Profile) => (
         <Tooltip title={p.notes}>
           <Space>
-            <Typography.Text strong>{p.name}</Typography.Text>
-            {p.fingerprintMode === "random" && <Tag>random</Tag>}
+            <Typography.Text strong style={{ maxWidth: 110 }} ellipsis={{ tooltip: p.name }}>
+              {p.name}
+            </Typography.Text>
+            {p.fingerprintMode === "random" && <Tag>{t.randomTag}</Tag>}
           </Space>
         </Tooltip>
       ),
     },
-    { title: t.colGroup, dataIndex: "group", key: "group", width: 120 },
+    { title: t.colGroup, dataIndex: "group", key: "group", width: 100, ellipsis: true },
     {
       title: t.colFingerprint,
       key: "fp",
-      width: 260,
       render: (_: unknown, p: Profile) => {
-        if (!p.summary) return <Tag color="warning">{t.needKernel}</Tag>;
+        if (!p.summary)
+          return (
+            <Tooltip title={t.needIdentityHint}>
+              <Tag color="warning">{t.needIdentity}</Tag>
+            </Tooltip>
+          );
         return (
           <Typography.Text style={{ fontSize: 12 }} ellipsis={{ tooltip: p.summary.ua }}>
             {p.summary.platform ?? "?"} · {p.summary.screen?.[0]}×{p.summary.screen?.[1]}
@@ -252,10 +297,15 @@ export function ProfilesPage(props: { running: Record<string, RunningState> }) {
     {
       title: t.colProxy,
       key: "proxy",
-      width: 150,
+      width: 100,
       render: (_: unknown, p: Profile) => {
         const kind = p.proxy.kind;
-        if (kind === "none") return <Tag>{t.none}</Tag>;
+        if (kind === "none")
+          return (
+            <Tooltip title={t.noProxyHint}>
+              <Tag color="orange">{t.hostIpTag}</Tag>
+            </Tooltip>
+          );
         const label = kind.toUpperCase();
         return (
           <Tooltip title={`${p.proxy.host}:${p.proxy.port}`}>
@@ -268,15 +318,15 @@ export function ProfilesPage(props: { running: Record<string, RunningState> }) {
       title: t.colLastLaunch,
       dataIndex: "lastLaunchedAt",
       key: "last",
-      width: 160,
+      width: 140,
       render: (v: number | null) =>
         v ? new Date(v * 1000).toLocaleString() : <Typography.Text type="secondary">{t.neverLaunched}</Typography.Text>,
     },
-    { title: t.colStatus, key: "status", width: 130, render: (_: unknown, p: Profile) => statusTag(p) },
+    { title: t.colStatus, key: "status", width: 100, render: (_: unknown, p: Profile) => statusTag(p) },
     {
       title: t.colActions,
       key: "actions",
-      width: 300,
+      width: 280,
       render: (_: unknown, p: Profile) => {
         const s = statusOf(p);
         const isRunning = !!s;
@@ -361,18 +411,25 @@ export function ProfilesPage(props: { running: Record<string, RunningState> }) {
           placeholder={t.searchPlaceholder}
           allowClear
           style={{ width: 240 }}
-          onSearch={setSearch}
+          value={search}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setPage(1);
+          }}
         />
         <Segmented
           value={groupFilter ?? ""}
-          onChange={(v) => setGroupFilter((v as string) || null)}
+          onChange={(v) => {
+            setGroupFilter((v as string) || null);
+            setPage(1);
+          }}
           options={[{ label: t.colGroup + ": " + t.none, value: "" }, ...groups.map((g) => ({ label: g, value: g }))]}
         />
         <Space style={{ marginLeft: "auto" }}>
-          <Button icon={<PlayCircleFilled />} onClick={batchLaunch}>
+          <Button icon={<PlayCircleFilled />} loading={batchBusy === "launch"} disabled={batchBusy !== null} onClick={() => runBatch("launch")}>
             {t.batchLaunch}
           </Button>
-          <Button icon={<StopOutlined />} onClick={batchClose}>
+          <Button icon={<StopOutlined />} loading={batchBusy === "close"} disabled={batchBusy !== null} onClick={() => runBatch("close")}>
             {t.batchClose}
           </Button>
           <Button icon={<ImportOutlined />} loading={busy} onClick={doImport}>
@@ -381,6 +438,9 @@ export function ProfilesPage(props: { running: Record<string, RunningState> }) {
           <Button icon={<ExportOutlined />} onClick={doExport}>
             {t.exportProfiles}
           </Button>
+          <Button icon={<SafetyOutlined />} onClick={() => setIsoOpen(true)}>
+            {t.isolation}
+          </Button>
         </Space>
       </div>
       <Table
@@ -388,7 +448,7 @@ export function ProfilesPage(props: { running: Record<string, RunningState> }) {
         columns={columns}
         dataSource={filtered}
         rowSelection={{ selectedRowKeys: selectedIds, onChange: setSelectedIds }}
-        pagination={{ pageSize: 20, showSizeChanger: false }}
+        pagination={{ current: page, pageSize: 20, showSizeChanger: false, onChange: setPage }}
         size="middle"
       />
       <ProfileEditModal
@@ -396,8 +456,7 @@ export function ProfilesPage(props: { running: Record<string, RunningState> }) {
         profile={editTarget}
         groups={groups}
         onClose={() => setEditOpen(false)}
-        onSaved={async () => {
-          setEditOpen(false);
+        onChanged={async () => {
           await reload();
         }}
       />
@@ -408,6 +467,7 @@ export function ProfilesPage(props: { running: Record<string, RunningState> }) {
           onClose={() => setCookieOpen(false)}
         />
       )}
+      <IsolationModal open={isoOpen} onClose={() => setIsoOpen(false)} />
     </div>
   );
 }
