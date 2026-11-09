@@ -1,6 +1,6 @@
 # CamFox 桌面主控
 
-FoxHub 的图形主控端：基于 Tauri 2 的指纹浏览器管理程序，仿 AdsPower / HubStudio 的使用方式，管理并多开 Camoufox 指纹浏览器环境。
+FoxHub 的图形主控端：基于 Tauri 2 的指纹浏览器管理程序，仿 AdsPower / HubStudio 的使用方式，管理并多开指纹浏览器环境。
 
 ```
 ┌────────────────────────┐
@@ -8,13 +8,13 @@ FoxHub 的图形主控端：基于 Tauri 2 的指纹浏览器管理程序，仿 
 ├────────────────────────┤
 │  gui/src-tauri (Rust)  │  环境存储、启动器、进程监管、代理转发器、Cookie 读写
 ├────────────────────────┤
-│  gui/sidecar (Python)  │  指纹生成 —— 包装 camoufox 包的 launch_options 管线
+│  gui/sidecar (Python)  │  指纹生成 —— 包装上游 launch_options 管线
 ├────────────────────────┤
-│  Camoufox 内核         │  camoufox.exe，身份经 CAMOU_CONFIG_* 环境变量注入
+│  浏览器内核            │  身份经 CAMOU_CONFIG_* 环境变量注入
 └────────────────────────┘
 ```
 
-**指纹逻辑只在 Python 一处实现。** Rust 后端从不自行拼装身份：它通过一次性 sidecar 进程（`prepare` 命令）调用 `camoufox.utils.launch_options`，拿到完整身份（含字体、语音、WebGL 参数、一致性校验结果），再以 `CAMOU_CONFIG_1..N` / `CAMOU_PREFS_1..N` 环境变量启动浏览器——与官方 Python 启动器相同的注入通道，但不依赖 Playwright。
+**指纹逻辑只在 Python 一处实现。** Rust 后端从不自行拼装身份：它通过一次性 sidecar 进程（`prepare` 命令）调用上游的 `launch_options` 管线（fpgen 抽取、一致性校验、字体/语音/WebGL 目录），拿到完整身份后，以 `CAMOU_CONFIG_1..N` / `CAMOU_PREFS_1..N` 环境变量启动浏览器——与官方 Python 启动器相同的注入通道，但不依赖 Playwright。
 
 ## 功能一览
 
@@ -34,11 +34,12 @@ FoxHub 的图形主控端：基于 Tauri 2 的指纹浏览器管理程序，仿 
 - Node.js ≥ 18 与 pnpm
 - Rust（Windows 为 msvc 工具链）与 WebView2
 - **python.org 的 Python ≥ 3.11**（开发运行需要；打包版内置）
-- 仓库的启动器包与 GeoIP 扩展：
+- 引擎包与 GeoIP 扩展（`camoufox` 为上游引擎包名，保留原名）：
   ```bash
   pip install -e "./python[geoip]"
+  python -m camoufox fetch
   ```
-- 浏览器内核：`python -m camoufox fetch`（或在内核管理页下载）
+- 浏览器内核：也可在应用内「内核管理」页下载
 
 > **不要使用 Microsoft Store 版 Python。** 它对 `AppData` 的写入走按应用虚拟化，装出来的内核文件对所有其他进程不可见，Playwright 驱动与 GUI 启动器都会报"executable doesn't exist"。
 
@@ -63,7 +64,7 @@ pnpm tauri build
 
 产物：`src-tauri/target/release/bundle/nsis/CamFox_<版本>_x64-setup.exe`。安装后布局：`<安装目录>\{camfox-gui.exe, sidecar\{camfox-sidecar.exe, _internal\}}`。
 
-`src-tauri/resources/camfox-sidecar/.gitkeep` 保证冻结产物缺失时开发构建仍然可用；冻结产物不入库。**改过 `python/` 或 sidecar 后必须重建冻结包**，否则安装包会带旧指纹逻辑。
+`src-tauri/resources/camfox-sidecar/.gitkeep` 保证冻结产物缺失时开发构建仍然可用；冻结产物不入库。**改过引擎包或 sidecar 后必须重建冻结包**，否则安装包会带旧指纹逻辑。
 
 ## 测试
 
@@ -86,7 +87,7 @@ cd gui          && npx tsc --noEmit   # 前端类型
 
 | 现象 | 原因与处理 |
 |---|---|
-| 启动报 `executable doesn't exist` | 用了 Microsoft Store Python（AppData 虚拟化）。装 python.org 版并在设置页指定解释器；内核用新解释器重新 `camoufox fetch`。 |
+| 启动报 `executable doesn't exist` | 用了 Microsoft Store Python（AppData 虚拟化）。装 python.org 版并在设置页指定解释器；内核用新解释器重新下载。 |
 | 首次生成指纹时闪出浏览器窗口 | 正常行为：启动器须以与真实启动相同的显示模式探测主机 GPU（否则 canvas 声明不一致）。结果落盘缓存（换内核失效，30 天 TTL），之后不再出现。 |
 | 关闭窗口后刚登录的 Cookie 不在 | 旧版本的强制杀进程问题，已改为 WM_CLOSE 温和关闭 + 20 秒宽限。请更新到最新构建。 |
 | PNG 导出（toDataURL）每次会话不同 | 与原版 Firefox 一致的每会话随机 `deBG` 块，像素本身固定（原版 Firefox 同样如此）。只影响对整段 PNG 字符串取哈希的站点。 |
@@ -94,7 +95,11 @@ cd gui          && npx tsc --noEmit   # 前端类型
 
 ## 已知限制
 
-- 开发运行需要本机 Python + `camoufox` 包；打包版内置冻结 sidecar，无此依赖。
-- 固定身份跨机器使用时，canvas 走宿主一致性路径的失效分支（随机回读）——与 Python 启动器行为一致；身份声明的 GPU 与宿主渲染设备一致时像素才是固定的。
+- 开发运行需要本机 Python + 引擎包；打包版内置冻结 sidecar，无此依赖。
+- 固定身份跨机器使用时，canvas 走宿主一致性路径的失效分支（随机回读）——与官方启动器行为一致；身份声明的 GPU 与宿主渲染设备一致时像素才是固定的。
 - 自动化模式为非持久会话（Playwright launchServer 无法通过 WebSocket 暴露持久 context），Cookie 不落盘；需要持久登录态用普通打开 + Cookie 导出。
 - 浏览器裸启动无法原生使用带认证代理，由内置转发器代劳；GUI 重启无法恢复转发器，需重开环境。
+
+## 开源参考
+
+指纹生成与浏览器构建基于开源社区成果：内核与管线源自 **[Camoufox](https://github.com/daijro/camoufox)**（[fpgen](https://github.com/scrapfly/fingerprint-generator)），相关许可随源码继承；桌面主控（`gui/`）为本仓库新增。
