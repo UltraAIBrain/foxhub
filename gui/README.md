@@ -1,82 +1,48 @@
-# CamFox GUI
+# CamFox 桌面主控
 
-An AdsPower-style control panel for [Camoufox](../README.md): manage browser
-environments (profiles), draw one fingerprint identity per environment, and
-open several isolated browser windows at once.
+FoxHub 的图形主控端：基于 Tauri 2 的指纹浏览器管理程序，仿 AdsPower / HubStudio 的使用方式，管理并多开 Camoufox 指纹浏览器环境。
 
-Every environment is a separate `camoufox` process with its own Firefox
-profile directory (cookies, storage, extensions) and its own identity, passed
-to the browser through the same `CAMOU_CONFIG_*` / `CAMOU_PREFS_*` channels the
-Python launcher uses. Fingerprint generation is **not** reimplemented here: the
-Tauri backend shells out to the `camoufox` Python package through a small
-sidecar CLI (`sidecar/camfox_sidecar`), so `python/src/camoufox/` stays the
-only copy of that logic.
+```
+┌────────────────────────┐
+│  gui/src  (React+AntD) │  界面：环境管理 / 内核管理 / 设置，中英双语
+├────────────────────────┤
+│  gui/src-tauri (Rust)  │  环境存储、启动器、进程监管、代理转发器、Cookie 读写
+├────────────────────────┤
+│  gui/sidecar (Python)  │  指纹生成 —— 包装 camoufox 包的 launch_options 管线
+├────────────────────────┤
+│  Camoufox 内核         │  camoufox.exe，身份经 CAMOU_CONFIG_* 环境变量注入
+└────────────────────────┘
+```
 
-## Features
+**指纹逻辑只在 Python 一处实现。** Rust 后端从不自行拼装身份：它通过一次性 sidecar 进程（`prepare` 命令）调用 `camoufox.utils.launch_options`，拿到完整身份（含字体、语音、WebGL 参数、一致性校验结果），再以 `CAMOU_CONFIG_1..N` / `CAMOU_PREFS_1..N` 环境变量启动浏览器——与官方 Python 启动器相同的注入通道，但不依赖 Playwright。
 
-- **Environment management** — create / edit / duplicate / delete profiles
-  with groups, notes and search; batch import/export as JSON.
-- **Fingerprints** — OS, screen, window size, locale, timezone and proxy are
-  drawn as one coherent identity via `camoufox.utils.launch_options`
-  (fpgen, coherence, fonts, voices, WebGL, media devices). Fixed identity per
-  profile, or redraw on every launch. The edit panel shows the resolved
-  identity (UA, platform, screen, GPU, locale, timezone, fonts/voices, media
-  devices) plus a stable **identity ID** — the hash of the frozen config, so
-  the user can prove every launch of a profile is the same machine.
-- **WebRTC** — per environment: follow the identity (with GeoIP it advertises
-  the proxy exit IP), block WebRTC entirely, or pin a specific IPv4 (IPv6
-  candidates disabled). GeoIP works with or without a proxy.
-- **Multi-open isolation** — one process + one profile directory + one
-  identity per environment; launch as many as the machine allows. The OS
-  window is sized to the identity's claimed outer window (written into the
-  profile's `xulstore.json` before each launch), so the real window matches
-  what the machine claims. On Windows the spawned executable is a launcher
-  that hands off to the browser process, so liveness is tracked by the
-  process carrying the profile path, not by the spawned pid. Closing posts
-  WM_CLOSE first and only forces after a 20-second grace, which lets Firefox
-  flush cookies and session state. After a GUI restart, still-running
-  browsers are re-attached automatically so Close works on them again (a
-  relaunched authenticated-proxy profile is needed to restore its proxy
-  forwarder).
-- **Proxies** — HTTP / SOCKS5 per environment, with or without credentials.
-  Authenticated proxies are served through a local SOCKS5 forwarder (Rust,
-  in-process) that injects the credentials upstream; the browser only ever
-  sees `127.0.0.1`. "Check proxy" resolves the exit IP and its GeoIP data.
-- **Cookie import/export** — Playwright JSON or Netscape `cookies.txt`,
-  while the environment is stopped.
-- **Automation** — expose a running environment on a Playwright WebSocket
-  endpoint (via `camoufox.server.launch_server`) for
-  `firefox.connect(endpoint)` scripts.
-- **Kernel management** — download / switch / remove browser builds through
-  the documented `camoufox` CLI.
+## 功能一览
 
-## Layout
+- **环境管理** —— 创建 / 编辑 / 复制 / 删除 / 搜索 / 分组；批量导入导出（JSON）；批量启动与关闭。
+- **指纹** —— 每环境固定或每次启动随机；编辑面板预填主机默认值，生成后展示完整身份（UA、平台、屏幕、色深、显卡、字体/语音数、媒体设备、时区/语言）与**指纹 ID**（冻结身份的哈希，跨启动核对一致）。修改影响身份的参数会自动重新生成。
+- **多开隔离** —— 每环境独立进程 + 独立数据目录 + 独立身份；真实窗口尺寸同步为身份声明的外窗大小。
+- **代理** —— HTTP / SOCKS5，带凭据的经内置本地 SOCKS5 转发器注入；一键检测出口 IP 与 GeoIP。
+- **GeoIP** —— 按出口 IP 推导时区/语言/坐标；不填代理时用本机公网 IP。
+- **WebRTC** —— 三种模式：跟随身份（配合 GeoIP 声明代理出口 IP）、完全屏蔽、指定 IPv4（同时关闭 IPv6 候选）。
+- **Cookie** —— Playwright JSON / Netscape cookies.txt 导入导出（环境关闭时）。
+- **自动化** —— 一键暴露 Playwright WebSocket 端点（`firefox.connect()` 接管；非持久会话）。
+- **内核管理** —— 下载 / 切换 / 删除内核版本，下载进度实时显示。
+- **进程监管** —— 关闭走 WM_CLOSE 温和退出（Cookie/会话落盘），20 秒后强制；GUI 重启后自动重新接管仍在运行的浏览器；出口时按设置批量关闭。
 
-| Path | What it is |
-|---|---|
-| `src/` | React 18 + Ant Design 5 frontend (Vite, TypeScript). |
-| `src-tauri/` | Tauri 2 Rust backend: profile store, launcher, proxy forwarder, cookie IO. |
-| `sidecar/camfox_sidecar/` | One-shot Python CLI (`prepare`, `check-proxy`, `kernel-*`, `automate`) wrapping the `camoufox` package. |
-| `sidecar/tests/` | Sidecar unit tests (pure logic, no network). |
+## 前置条件
 
-## Prerequisites
-
-- Node.js ≥ 18 and pnpm
-- Rust (msvc toolchain on Windows) and WebView2
-- **A python.org Python ≥ 3.11** — not the Microsoft Store build. The Store
-  Python writes under `AppData` through per-app virtualization: files its
-  installer puts in `AppData\Local` (the fetched kernel among them) are
-  invisible to every other process, so Playwright's driver and the GUI
-  launcher both fail with "executable doesn't exist". Settings → Python
-  interpreter must point at the real interpreter.
-- The repo's launcher package and the GeoIP extra, installed with that
-  interpreter:
+- Node.js ≥ 18 与 pnpm
+- Rust（Windows 为 msvc 工具链）与 WebView2
+- **python.org 的 Python ≥ 3.11**（开发运行需要；打包版内置）
+- 仓库的启动器包与 GeoIP 扩展：
   ```bash
   pip install -e "./python[geoip]"
   ```
-- A browser kernel (`camoufox fetch` once, or use the Kernel Management page).
+- 浏览器内核：`python -m camoufox fetch`（或在内核管理页下载）
 
-## Development
+> **不要使用 Microsoft Store 版 Python。** 它对 `AppData` 的写入走按应用虚拟化，装出来的内核文件对所有其他进程不可见，Playwright 驱动与 GUI 启动器都会报"executable doesn't exist"。
+
+## 开发运行
 
 ```bash
 cd gui
@@ -84,94 +50,51 @@ pnpm install
 pnpm tauri dev
 ```
 
-The sidecar is found automatically at `gui/sidecar` in dev builds. Point
-Settings → Sidecar directory elsewhere only if you move it.
+开发版自动在 `gui/sidecar` 找到 sidecar 源码。打包版则优先使用冻结的 sidecar（见下）。
 
-## Packaging (self-contained installer)
-
-The release app bundles the sidecar as a frozen PyInstaller build
-(`camfox-sidecar.exe` + `_internal`), so end users need **no Python
-installed**. The browser kernel itself is not bundled (2+ GB); it is
-downloaded in-app on first run (Kernel Management page or `camoufox fetch`).
-
-Build steps, from `gui/`, with the interpreter that has `camoufox[geoip]`,
-playwright and pyinstaller installed:
+## 打包（自带 Python 的安装包）
 
 ```bash
-cd sidecar
-python -m PyInstaller camfox_sidecar.spec --noconfirm \
-    --distpath ../src-tauri/resources --workpath build
+cd gui/sidecar
+python -m PyInstaller camfox_sidecar.spec --noconfirm --distpath ../src-tauri/resources --workpath build
 cd ..
 pnpm tauri build
 ```
 
-The installer lands in `src-tauri/target/release/bundle/nsis/`. The frozen
-sidecar is rebuilt from the spec whenever the launcher package or the
-sidecar changes; a stale build silently runs old fingerprint logic.
+产物：`src-tauri/target/release/bundle/nsis/CamFox_<版本>_x64-setup.exe`。安装后布局：`<安装目录>\{camfox-gui.exe, sidecar\{camfox-sidecar.exe, _internal\}}`。
 
-`src-tauri/resources/camfox-sidecar/.gitkeep` keeps the resource path valid
-for dev builds before the first frozen build exists.
+`src-tauri/resources/camfox-sidecar/.gitkeep` 保证冻结产物缺失时开发构建仍然可用；冻结产物不入库。**改过 `python/` 或 sidecar 后必须重建冻结包**，否则安装包会带旧指纹逻辑。
 
-## Tests
+## 测试
 
 ```bash
-cd gui/src-tauri && cargo test        # store, env chunking, forwarder handshake
-cd gui/sidecar && pytest tests -q     # sidecar protocol/mapping
+cd gui/src-tauri && cargo test        # 存储、env 分块、转发器握手、进程识别、xulstore
+cd gui/sidecar  && pytest tests -q    # 协议、身份摘要、WebRTC 映射、GPU 缓存
+cd gui          && npx tsc --noEmit   # 前端类型
 ```
 
-The end-to-end checks (launch two environments, verify distinct identities and
-cookie isolation, proxy forwarder exit IP, cookie roundtrip, automation
-endpoint) are manual; see the checklist below.
+端到端手工验收（对照清单）：
 
-## Manual verification checklist
+1. 建两个不同 OS 设置的环境并同时打开——两个独立窗口，UA / 平台 / 屏幕各不相同。
+2. 在环境 A 登录某站点，环境 B 不共享该会话。
+3. 给环境配带认证的 SOCKS5 代理，「检测代理」读出的出口 IP 应为代理 IP。
+4. 从 A 导出 Cookie（JSON）导入新环境，登录态应迁移。
+5. 打开自动化端点，用 `p.firefox.connect("ws://127.0.0.1:<port>")` 连接并读页面标题。
+6. 同一环境反复打开，「指纹 ID」应完全一致；canvas 像素逐位一致。
 
-1. Create two environments with different OS settings and launch both:
-   two independent windows; `bot.sannysoft.com` / CreepJS show different
-   UA, platform and screen.
-2. Log into a site in environment A; environment B sees no session.
-3. Set an authenticated SOCKS5 proxy on an environment, launch, and confirm
-   the exit IP on the "Check proxy" readout matches the proxy.
-4. Export cookies from environment A (JSON), import into a fresh
-   environment, and confirm the session carries over.
-5. Enable automation on an environment, open it via the automation action,
-   and connect:
-   ```python
-   from playwright.sync_api import sync_playwright
+## 常见问题
 
-   with sync_playwright() as p:
-       browser = p.firefox.connect("ws://127.0.0.1:<port>")
-       print(browser.contexts[0].pages[0].title())
-   ```
+| 现象 | 原因与处理 |
+|---|---|
+| 启动报 `executable doesn't exist` | 用了 Microsoft Store Python（AppData 虚拟化）。装 python.org 版并在设置页指定解释器；内核用新解释器重新 `camoufox fetch`。 |
+| 首次生成指纹时闪出浏览器窗口 | 正常行为：启动器须以与真实启动相同的显示模式探测主机 GPU（否则 canvas 声明不一致）。结果落盘缓存（换内核失效，30 天 TTL），之后不再出现。 |
+| 关闭窗口后刚登录的 Cookie 不在 | 旧版本的强制杀进程问题，已改为 WM_CLOSE 温和关闭 + 20 秒宽限。请更新到最新构建。 |
+| PNG 导出（toDataURL）每次会话不同 | 与原版 Firefox 一致的每会话随机 `deBG` 块，像素本身固定（原版 Firefox 同样如此）。只影响对整段 PNG 字符串取哈希的站点。 |
+| 重启 GUI 后浏览器还在跑但列表没有 | 新版会自动重新接管；若没有，确认该环境数据目录未被移动。接管后的认证代理需重开一次环境（转发器是进程内的）。 |
 
-## Known limitations
+## 已知限制
 
-- **Canvas fingerprint stability.** Canvas *pixels* are fixed by the identity
-  and are bit-identical on every launch of a profile (verified: two launches
-  of the same frozen identity, no differing pixels). `toDataURL()` /
-  `toBlob()` bytes still differ per session because stock Firefox appends a
-  per-session random `deBG` chunk to the PNG — measured identically on a
-  stock Mozilla Firefox build. Sites that hash the decoded pixels see a
-  stable canvas; sites that hash the whole PNG string see the same per-session
-  change every Firefox user has. Removing that chunk would deviate from stock
-  Firefox and become its own fingerprint, so it is deliberately kept.
-- Generating a fingerprint probes the host GPU by really launching the kernel
-  headed once (two windows flash for a few seconds). The sidecar caches the
-  probe result on disk (invalidated by a kernel change, 30-day TTL), so the
-  flash happens once per kernel build; later saves and random-mode launches
-  read the cache. The probe must run in the same display mode as the real
-  launch — a headless probe would report a different renderer and break
-  canvas coherence — so it cannot be hidden.
-- Dev builds need the Python interpreter and the `camoufox` package
-  installed on the machine (fingerprint generation needs its data files);
-  packaged releases carry a frozen sidecar instead.
-- A fixed identity is frozen at generation time on that host: moving a profile
-  to another machine leaves WebGL/canvas on the host-parity path (random
-  canvas readback), exactly as the Python launcher behaves.
-- Automation mode serves a non-persistent browser (Playwright launchServer
-  cannot serve a persistent context over WebSocket), so cookies do not persist
-  in that mode; use normal open + cookie export for that.
-- Firefox cannot use authenticated proxies natively on a bare launch; the
-  built-in forwarder covers it, and the browser itself only sees localhost.
-- The Microsoft Store Python is unsupported for dev builds: its AppData
-  virtualization hides the fetched kernel from every other process (see
-  Prerequisites).
+- 开发运行需要本机 Python + `camoufox` 包；打包版内置冻结 sidecar，无此依赖。
+- 固定身份跨机器使用时，canvas 走宿主一致性路径的失效分支（随机回读）——与 Python 启动器行为一致；身份声明的 GPU 与宿主渲染设备一致时像素才是固定的。
+- 自动化模式为非持久会话（Playwright launchServer 无法通过 WebSocket 暴露持久 context），Cookie 不落盘；需要持久登录态用普通打开 + Cookie 导出。
+- 浏览器裸启动无法原生使用带认证代理，由内置转发器代劳；GUI 重启无法恢复转发器，需重开环境。
